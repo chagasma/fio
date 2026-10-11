@@ -8,7 +8,13 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 description = "Demand-based context manager for development with agents"
-include = ["src/**", "Cargo.toml", "Cargo.lock", "README.md", "AGENTS.md", ".claude/skills/fio/SKILL.md"]
+license = "MIT"
+repository = "https://github.com/chagasma/fio"
+readme = "README.md"
+keywords = ["cli", "tui", "agents", "context", "markdown"]
+categories = ["command-line-utilities", "development-tools"]
+publish = false
+include = ["src/**", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md", "AGENTS.md", ".claude/skills/fio/SKILL.md"]
 
 [dependencies]
 anyhow = "1"

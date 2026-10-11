@@ -41,9 +41,6 @@ Files reload automatically; F5 refreshes manually.
 Warnings
 ";
 
-/// Rows needed below the mascot to show the whole help text without scrolling.
-const HELP_ROWS: u16 = 32;
-
 const GLOBAL_VIEWS: [&str; 5] = ["Projects", "All demands", "Active", "Questions", "Debts"];
 
 fn panel() -> Block<'static> {
@@ -73,9 +70,6 @@ impl App {
 
     /// Whether the visible screen shows the animated mascot.
     pub(super) fn is_animating(&self, area: Rect) -> bool {
-        if matches!(self.modal, Modal::Help) {
-            return mascot::fits(area, HELP_ROWS);
-        }
         self.shows_empty_state() && mascot::fits(area, 4)
     }
 
@@ -221,9 +215,23 @@ impl App {
     fn draw_empty(&self, frame: &mut Frame, area: Rect, block: Block<'_>, message: &str) {
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let mut text_area = inner;
-        if mascot::fits(inner, 4) {
-            mascot::render(frame, inner, self.mascot_frame());
+        // Center the mascot and its message as one group.
+        let group = mascot::ROWS + 2;
+        let show_mascot = mascot::fits(inner, 4);
+        let height = if show_mascot { group } else { 1 };
+        let top = inner.y + inner.height.saturating_sub(height) / 2;
+        let mut text_area = Rect::new(
+            inner.x,
+            top,
+            inner.width,
+            inner.bottom().saturating_sub(top),
+        );
+        if show_mascot {
+            mascot::render(
+                frame,
+                Rect::new(inner.x, top, inner.width, mascot::ROWS),
+                self.mascot_frame(),
+            );
             text_area.y += mascot::ROWS + 1;
             text_area.height = text_area.height.saturating_sub(mascot::ROWS + 1);
         }
@@ -243,20 +251,7 @@ impl App {
         };
         let text = theme::styled(&format!("{HELP}{warnings}"));
         let block = block.title(Span::styled(" Help ", theme::heading()));
-        if mascot::fits(area, HELP_ROWS) {
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-            mascot::render(frame, inner, self.mascot_frame());
-            let rest = Rect::new(
-                inner.x,
-                inner.y + mascot::ROWS + 1,
-                inner.width,
-                inner.height.saturating_sub(mascot::ROWS + 1),
-            );
-            self.render_scrolled(frame, rest, text);
-        } else {
-            self.render_text(frame, area, text, block);
-        }
+        self.render_text(frame, area, text, block);
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {

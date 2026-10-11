@@ -1,13 +1,15 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    layout::{Alignment, Constraint, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Wrap},
 };
 
 use super::{
-    App, Modal,
+    App, Modal, mascot,
     screen::{Screen, Tab},
+    theme,
 };
 
 const HELP: &str = "Keyboard
@@ -39,6 +41,18 @@ Files reload automatically; F5 refreshes manually.
 Warnings
 ";
 
+/// Rows needed below the mascot to show the whole help text without scrolling.
+const HELP_ROWS: u16 = 32;
+
+const GLOBAL_VIEWS: [&str; 5] = ["Projects", "All demands", "Active", "Questions", "Debts"];
+
+fn panel() -> Block<'static> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border())
+        .padding(Padding::horizontal(1))
+}
+
 impl App {
     pub(super) fn draw(&mut self, frame: &mut Frame) {
         let areas = Layout::vertical([
@@ -52,83 +66,106 @@ impl App {
         self.draw_footer(frame, areas[2]);
     }
 
+    /// Index of the mascot frame to show right now.
+    fn mascot_frame(&self) -> usize {
+        (self.started.elapsed().as_millis() / 250) as usize % mascot::FRAME_COUNT
+    }
+
+    /// Whether the visible screen shows the animated mascot.
+    pub(super) fn is_animating(&self, area: Rect) -> bool {
+        if matches!(self.modal, Modal::Help) {
+            return mascot::fits(area, HELP_ROWS);
+        }
+        self.shows_empty_state() && mascot::fits(area, 4)
+    }
+
+    fn shows_empty_state(&self) -> bool {
+        !matches!(self.modal, Modal::Picker(_))
+            && !self.is_detail()
+            && (self.rows_error.is_some() || self.rows.is_empty())
+    }
+
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let title = match self.screen {
-            Screen::Projects => "Projects",
-            Screen::Demands(_) => "Demands",
-            Screen::Active => "Active / blocked",
-            Screen::Questions => "Open questions",
-            Screen::Debts => "Open debts",
-            Screen::Search => "Search",
-            Screen::Detail(_) => "Demand",
+        let current = match self.screen {
+            Screen::Projects => Some(0),
+            Screen::Demands(_) => Some(1),
+            Screen::Active => Some(2),
+            Screen::Questions => Some(3),
+            Screen::Debts => Some(4),
+            Screen::Search | Screen::Detail(_) => None,
         };
-        let navigation = if self.is_detail() {
+        let items: Vec<(String, bool)> = if self.is_detail() {
             Tab::ALL
                 .iter()
+                .map(|tab| (tab.title().to_owned(), *tab == self.tab))
+                .collect()
+        } else {
+            GLOBAL_VIEWS
+                .iter()
                 .enumerate()
-                .map(|(i, tab)| {
-                    let marker = if *tab == self.tab { " *" } else { "" };
-                    format!("{} {}{marker}", i + 1, tab.title())
-                })
-                .collect::<Vec<_>>()
-                .join("  ")
-        } else {
-            "1 Projects  2 All demands  3 Active  4 Questions  5 Debts".into()
+                .map(|(i, name)| ((*name).to_owned(), current == Some(i)))
+                .collect()
         };
-        let query = if self.screen == Screen::Search {
-            format!(": {} (up to 200 matches)", self.query)
-        } else {
-            String::new()
-        };
-        frame.render_widget(
-            Paragraph::new(navigation)
-                .style(Style::default().fg(Color::Cyan))
-                .block(Block::default().borders(Borders::ALL).title(format!(
-                    " fio / {title}{query} · {} projects · {} demands ",
+        let mut navigation = Vec::new();
+        for (index, (name, active)) in items.into_iter().enumerate() {
+            let label = format!(" {} {} ", index + 1, name);
+            let style = if active {
+                theme::selected()
+            } else {
+                theme::muted()
+            };
+            navigation.push(Span::styled(label, style));
+            navigation.push(Span::raw(" "));
+        }
+        if self.screen == Screen::Search {
+            navigation.push(Span::styled(
+                format!(" search: {} (up to 200 matches) ", self.query),
+                theme::selected(),
+            ));
+        }
+        let title = Line::from(vec![
+            Span::styled(" fio ", theme::selected()),
+            Span::styled(
+                format!(
+                    " {} projects · {} demands ",
                     self.catalog.projects.len(),
                     self.catalog.demands.len()
-                ))),
+                ),
+                theme::muted(),
+            ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(Line::from(navigation)).block(panel().title(title)),
             area,
         );
     }
 
     fn draw_body(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::default().borders(Borders::ALL);
-        match &self.modal {
-            Modal::Picker(picker) => {
-                let items: Vec<_> = picker
-                    .choices
-                    .iter()
-                    .map(|(label, _)| ListItem::new(label.clone()))
-                    .collect();
-                let mut state = ListState::default().with_selected(Some(picker.selected));
-                frame.render_stateful_widget(
-                    List::new(items)
-                        .block(
-                            block.title(format!(" {} · Enter launch · Esc cancel ", picker.title)),
-                        )
-                        .highlight_symbol("› ")
-                        .highlight_style(Style::default().fg(Color::Cyan)),
-                    area,
-                    &mut state,
-                );
-                return;
-            }
-            Modal::Help => {
-                let warnings = if self.catalog.warnings.is_empty() {
-                    "None".into()
-                } else {
-                    self.catalog.warnings.join("\n")
-                };
-                self.render_text(
-                    frame,
-                    area,
-                    format!("{HELP}{warnings}"),
-                    block.title(" Help "),
-                );
-                return;
-            }
-            _ => (),
+        let block = panel();
+        if let Modal::Picker(picker) = &self.modal {
+            let items: Vec<_> = picker
+                .choices
+                .iter()
+                .map(|(label, _)| ListItem::new(label.clone()))
+                .collect();
+            let mut state = ListState::default().with_selected(Some(picker.selected));
+            let title = Line::from(vec![
+                Span::styled(format!(" {} ", picker.title), theme::heading()),
+                Span::styled("Enter launch · Esc cancel ", theme::muted()),
+            ]);
+            frame.render_stateful_widget(
+                List::new(items)
+                    .block(block.title(title))
+                    .highlight_symbol("▶ ")
+                    .highlight_style(theme::selected()),
+                area,
+                &mut state,
+            );
+            return;
+        }
+        if matches!(self.modal, Modal::Help) {
+            self.draw_help(frame, area, block);
+            return;
         }
         if let Screen::Detail(key) = &self.screen {
             let text = if let Some(text) = &self.detail {
@@ -148,70 +185,180 @@ impl App {
                 self.detail = Some(text.clone());
                 text
             };
-            self.render_text(frame, area, text, block);
+            self.render_text(frame, area, theme::styled(&text), block);
             return;
         }
-        if let Some(error) = &self.rows_error {
-            frame.render_widget(
-                Paragraph::new(format!("Could not load view: {error}")).block(block),
-                area,
-            );
-        } else if self.rows.is_empty() {
-            let text = if self.catalog.projects.is_empty() {
-                "No projects registered. Run fio init in a workspace."
-            } else {
-                "No items match this view."
+        if self.shows_empty_state() {
+            let message = match (&self.rows_error, self.catalog.projects.is_empty()) {
+                (Some(error), _) => format!("Could not load view: {error}"),
+                (None, true) => "No projects registered. Run fio init in a workspace.".to_owned(),
+                (None, false) => "No items match this view.".to_owned(),
             };
-            frame.render_widget(Paragraph::new(text).block(block), area);
+            self.draw_empty(frame, area, block, &message);
+            return;
+        }
+        let selected = self
+            .selection
+            .selected()
+            .unwrap_or(0)
+            .min(self.rows.len() - 1);
+        self.selection.select(Some(selected));
+        let items: Vec<_> = self
+            .rows
+            .iter()
+            .map(|row| ListItem::new(row.label.clone()))
+            .collect();
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(block)
+                .highlight_symbol("▶ ")
+                .highlight_style(theme::selected()),
+            area,
+            &mut self.selection,
+        );
+    }
+
+    fn draw_empty(&self, frame: &mut Frame, area: Rect, block: Block<'_>, message: &str) {
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let mut text_area = inner;
+        if mascot::fits(inner, 4) {
+            mascot::render(frame, inner, self.mascot_frame());
+            text_area.y += mascot::ROWS + 1;
+            text_area.height = text_area.height.saturating_sub(mascot::ROWS + 1);
+        }
+        frame.render_widget(
+            Paragraph::new(Span::styled(message.to_owned(), theme::muted()))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            text_area,
+        );
+    }
+
+    fn draw_help(&mut self, frame: &mut Frame, area: Rect, block: Block<'_>) {
+        let warnings = if self.catalog.warnings.is_empty() {
+            "None".into()
         } else {
-            let selected = self
-                .selection
-                .selected()
-                .unwrap_or(0)
-                .min(self.rows.len() - 1);
-            self.selection.select(Some(selected));
-            let items: Vec<_> = self
-                .rows
-                .iter()
-                .map(|row| ListItem::new(row.label.as_str()))
-                .collect();
-            frame.render_stateful_widget(
-                List::new(items)
-                    .block(block)
-                    .highlight_symbol("› ")
-                    .highlight_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray)),
-                area,
-                &mut self.selection,
+            self.catalog.warnings.join("\n")
+        };
+        let text = theme::styled(&format!("{HELP}{warnings}"));
+        let block = block.title(Span::styled(" Help ", theme::heading()));
+        if mascot::fits(area, HELP_ROWS) {
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            mascot::render(frame, inner, self.mascot_frame());
+            let rest = Rect::new(
+                inner.x,
+                inner.y + mascot::ROWS + 1,
+                inner.width,
+                inner.height.saturating_sub(mascot::ROWS + 1),
             );
+            self.render_scrolled(frame, rest, text);
+        } else {
+            self.render_text(frame, area, text, block);
         }
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
-        let footer = match &self.modal {
-            Modal::Input { prompt, text } => {
-                format!("{}{text}▏\n{}", prompt.label(), self.message)
-            }
-            _ => format!(
-                "Status filter: {} · Priority filter: {} · {} warnings\nn new · s status · u active · c copy · e edit · r resume · ? help  {}",
-                self.status.map_or_else(|| "all".into(), |s| s.to_string()),
+        let lines = if let Modal::Input { prompt, text } = &self.modal {
+            vec![
+                Line::from(vec![
+                    Span::styled(prompt.label(), theme::heading()),
+                    Span::raw(text.clone()),
+                    Span::styled("▏", theme::accent()),
+                ]),
+                Line::from(Span::styled(
+                    self.message.clone(),
+                    theme::message(&self.message),
+                )),
+            ]
+        } else {
+            let filter = |name: &str, value: Option<Span<'static>>| {
+                let value = value.unwrap_or_else(|| Span::styled("all", theme::muted()));
+                vec![Span::styled(format!("{name} "), theme::muted()), value]
+            };
+            let mut filters = filter(
+                "status",
+                self.status
+                    .map(|s| Span::styled(s.name(), theme::status(s))),
+            );
+            filters.push(Span::raw("   "));
+            filters.extend(filter(
+                "priority",
                 self.priority
-                    .map_or_else(|| "all".into(), |p| p.to_string()),
-                self.catalog.warnings.len(),
-                self.message
-            ),
+                    .map(|p| Span::styled(p.to_string(), theme::priority(p))),
+            ));
+            filters.push(Span::styled(
+                format!("   {} warnings", self.catalog.warnings.len()),
+                theme::muted(),
+            ));
+            let mut hints = Vec::new();
+            for (key, what) in [
+                ("n", "new"),
+                ("s", "status"),
+                ("u", "active"),
+                ("c", "copy"),
+                ("e", "edit"),
+                ("r", "resume"),
+                ("/", "search"),
+                ("?", "help"),
+            ] {
+                hints.extend(theme::hint(key, what));
+            }
+            hints.push(Span::styled(
+                self.message.clone(),
+                theme::message(&self.message).add_modifier(Modifier::ITALIC),
+            ));
+            vec![Line::from(filters), Line::from(hints)]
         };
-        frame.render_widget(
-            Paragraph::new(footer).block(Block::default().borders(Borders::ALL)),
-            area,
-        );
+        frame.render_widget(Paragraph::new(lines).block(panel()), area);
     }
 
-    fn render_text(&mut self, frame: &mut Frame, area: Rect, text: String, block: Block<'_>) {
-        let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
-        let lines = paragraph.line_count(area.width.saturating_sub(2));
-        let visible = area.height.saturating_sub(2) as usize;
-        self.max_scroll = u16::try_from(lines.saturating_sub(visible)).unwrap_or(u16::MAX);
-        self.scroll = self.scroll.min(self.max_scroll);
-        frame.render_widget(paragraph.block(block).scroll((self.scroll, 0)), area);
+    fn render_text(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        text: Text<'static>,
+        block: Block<'_>,
+    ) {
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        self.render_scrolled(frame, inner, text);
     }
+
+    fn render_scrolled(&mut self, frame: &mut Frame, area: Rect, text: Text<'static>) {
+        let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+        let lines = paragraph.line_count(area.width);
+        self.max_scroll =
+            u16::try_from(lines.saturating_sub(area.height as usize)).unwrap_or(u16::MAX);
+        self.scroll = self.scroll.min(self.max_scroll);
+        frame.render_widget(paragraph.scroll((self.scroll, 0)), area);
+    }
+}
+
+/// The splash shown briefly when the TUI opens.
+pub(super) fn draw_splash(frame: &mut Frame, index: usize) {
+    let area = frame.area();
+    let height = mascot::ROWS + 3;
+    if area.height < height || area.width < mascot::COLUMNS {
+        return;
+    }
+    let top = area.y + (area.height - height) / 2;
+    mascot::render(
+        frame,
+        Rect::new(area.x, top, area.width, mascot::ROWS),
+        index,
+    );
+    let title = Paragraph::new(vec![
+        Line::from(Span::styled("fio", theme::heading())),
+        Line::from(Span::styled(
+            "demand-based context for agents",
+            Style::new().add_modifier(Modifier::DIM),
+        )),
+    ])
+    .alignment(Alignment::Center);
+    frame.render_widget(
+        title,
+        Rect::new(area.x, top + mascot::ROWS + 1, area.width, 2),
+    );
 }

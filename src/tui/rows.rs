@@ -1,10 +1,15 @@
 use std::path::Path;
 
 use anyhow::Result;
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+};
 
 use super::{
     App,
     screen::{Row, Screen, Tab},
+    theme,
 };
 use crate::{
     index::HitKind,
@@ -32,7 +37,12 @@ impl App {
             .projects
             .iter()
             .map(|project| Row {
-                label: format!("{}    {}", project.name, project.workspace.display()),
+                label: Line::from(vec![
+                    Span::styled(project.name.clone(), theme::heading()),
+                    Span::raw("   "),
+                    Span::styled(project.workspace.display().to_string(), theme::muted()),
+                ])
+                .into(),
                 target: Screen::Demands(Some(project.workspace.clone())),
                 tab: Tab::Summary,
             })
@@ -49,15 +59,15 @@ impl App {
                     id: hit.demand.parse::<DemandId>().ok()?,
                 };
                 self.catalog.find(&key)?;
+                let title = Line::from(vec![
+                    Span::styled(format!("{}/{}", hit.project, hit.demand), theme::heading()),
+                    Span::styled(format!("  [{}]  ", hit.kind.name()), theme::muted()),
+                    Span::raw(hit.title.clone()),
+                ]);
+                let mut snippet = vec![Span::raw("    ")];
+                snippet.extend(highlight(&hit.snippet.replace('\n', " ")));
                 Some(Row {
-                    label: format!(
-                        "{}/{} [{}] {}\n  {}",
-                        hit.project,
-                        hit.demand,
-                        hit.kind.name(),
-                        hit.title,
-                        hit.snippet.replace('\n', " ")
-                    ),
+                    label: Text::from(vec![title, Line::from(snippet)]),
                     target: Screen::Detail(key),
                     tab: if hit.kind == HitKind::Session {
                         Tab::Sessions
@@ -71,6 +81,16 @@ impl App {
 
     fn demand_rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
+        let name_width = self
+            .catalog
+            .demands
+            .iter()
+            .map(|entry| {
+                let demand = &entry.loaded.document.metadata;
+                demand.project.chars().count() + 1 + demand.id.as_str().chars().count()
+            })
+            .max()
+            .unwrap_or(0);
         for entry in &self.catalog.demands {
             let demand = &entry.loaded.document.metadata;
             if self.status.is_some_and(|status| demand.status != status)
@@ -88,22 +108,40 @@ impl App {
                 _ => (),
             }
             let is_default = self.catalog.active.get(&entry.workspace) == Some(&demand.id);
-            let prefix = format!(
-                "{}/{}{}  [{} / {}]",
-                demand.project,
-                demand.id,
-                if is_default { " *" } else { "" },
-                demand.status,
-                demand.priority
-            );
+            let name = format!("{}/{}", demand.project, demand.id);
+            let mut prefix = vec![
+                Span::styled(format!("{name:<name_width$}"), theme::heading()),
+                if is_default {
+                    Span::styled(
+                        " *",
+                        Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::raw("  ")
+                },
+            ];
+            prefix.extend([
+                Span::raw("  "),
+                Span::styled(
+                    format!("{:<8}", demand.status.name()),
+                    theme::status(demand.status),
+                ),
+                Span::styled(
+                    format!(" {:<6}", demand.priority.to_string()),
+                    theme::priority(demand.priority),
+                ),
+                Span::raw("  "),
+            ]);
             let kind = match self.screen {
                 Screen::Questions => Some(ItemKind::Question),
                 Screen::Debts => Some(ItemKind::Debt),
                 _ => None,
             };
             let Some(kind) = kind else {
+                let mut spans = prefix;
+                spans.push(Span::raw(demand.title.clone()));
                 rows.push(Row {
-                    label: format!("{prefix}  {}", demand.title),
+                    label: Line::from(spans).into(),
                     target: Screen::Detail(entry.key()),
                     tab: Tab::Summary,
                 });
@@ -113,10 +151,14 @@ impl App {
                 |error| vec![format!("Could not read {}: {error:#}", kind.section())],
                 |items| items.into_iter().map(|item| item.text).collect(),
             );
-            rows.extend(texts.into_iter().map(|text| Row {
-                label: format!("{prefix}  {text}"),
-                target: Screen::Detail(entry.key()),
-                tab: Tab::for_kind(kind),
+            rows.extend(texts.into_iter().map(|text| {
+                let mut spans = prefix.clone();
+                spans.push(Span::raw(text));
+                Row {
+                    label: Line::from(spans).into(),
+                    target: Screen::Detail(entry.key()),
+                    tab: Tab::for_kind(kind),
+                }
             }));
         }
         rows
@@ -184,4 +226,23 @@ impl App {
                 .join("\n"),
         })
     }
+}
+
+/// Splits a search snippet at its `[match]` markers and emphasizes the matches.
+fn highlight(snippet: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = snippet;
+    while let Some(start) = rest.find('[') {
+        let Some(end) = rest[start..].find(']') else {
+            break;
+        };
+        spans.push(Span::styled(rest[..start].to_owned(), theme::muted()));
+        spans.push(Span::styled(
+            rest[start + 1..start + end].to_owned(),
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+        rest = &rest[start + end + 1..];
+    }
+    spans.push(Span::styled(rest.to_owned(), theme::muted()));
+    spans
 }

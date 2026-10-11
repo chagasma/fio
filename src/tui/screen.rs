@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use ratatui::text::Text;
+
 use crate::{
     model::{ItemKind, Status},
     store::catalog::DemandKey,
@@ -89,7 +91,7 @@ impl Tab {
 }
 
 pub struct Row {
-    pub label: String,
+    pub label: Text<'static>,
     pub target: Screen,
     pub tab: Tab,
 }

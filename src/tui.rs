@@ -1,11 +1,16 @@
 mod actions;
 mod input;
+mod mascot;
 mod rows;
 mod screen;
+mod theme;
 mod ui;
 mod watch;
 
-use std::{io::IsTerminal, time::Duration};
+use std::{
+    io::IsTerminal,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, ensure};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -49,6 +54,8 @@ struct App {
     rows_error: Option<String>,
     /// Rendered text of the current detail screen; cleared by `invalidate`.
     detail: Option<String>,
+    /// When the TUI started; drives the mascot animation.
+    started: Instant,
 }
 
 pub fn run() -> Result<()> {
@@ -78,6 +85,7 @@ pub fn run() -> Result<()> {
         rows: Vec::new(),
         rows_error: None,
         detail: None,
+        started: Instant::now(),
     };
     app.invalidate();
     let mut watch = watch::FileWatch::new().ok();
@@ -97,7 +105,9 @@ impl App {
         terminal: &mut ratatui::DefaultTerminal,
         watch: &mut Option<watch::FileWatch>,
     ) -> Result<()> {
+        self.splash(terminal)?;
         let mut redraw = true;
+        let mut last_tick = Instant::now();
         loop {
             if redraw {
                 terminal.draw(|frame| self.draw(frame))?;
@@ -119,6 +129,12 @@ impl App {
                     }
                     _ => (),
                 }
+            }
+            if self.is_animating(terminal.get_frame().area())
+                && last_tick.elapsed() >= Duration::from_millis(250)
+            {
+                last_tick = Instant::now();
+                redraw = true;
             }
             if !event::poll(Duration::from_millis(100))? {
                 continue;
@@ -153,6 +169,20 @@ impl App {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// A short intro animation; any key skips it.
+    fn splash(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(1000) {
+            let index = (start.elapsed().as_millis() / 150) as usize;
+            terminal.draw(|frame| ui::draw_splash(frame, index))?;
+            if event::poll(Duration::from_millis(50))? && matches!(event::read()?, Event::Key(_)) {
+                break;
+            }
+        }
+        self.started = Instant::now();
         Ok(())
     }
 

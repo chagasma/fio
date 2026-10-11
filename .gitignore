@@ -1,0 +1,6 @@
+/target/
+/.fio/state.toml
+/.fio/state.lock
+/.fio/demands/*/write.lock
+/.claude/settings.local.json
+/.codex/hooks.json

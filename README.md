@@ -2,6 +2,10 @@
 
 A demand-based context manager for development with agents. Demands, decisions, questions, debts and session summaries live in Markdown files under `.fio/` in each workspace. People, agents and scripts can use the CLI; running `fio` opens the terminal interface.
 
+## Supported platforms and versions
+
+The first public release targets Linux x86_64. macOS and Windows are untested and not advertised. Versions follow SemVer; while fio is 0.x, the CLI and record format may change between minor versions, and changes are listed in the release notes. Records are plain Markdown and stay editable by hand. Licensed under MIT.
+
 ## Install from source
 
 With Rust 1.99 or later, run this in the cloned repository:

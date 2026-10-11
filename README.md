@@ -6,6 +6,24 @@ A demand-based context manager for development with agents. Demands, decisions, 
 
 The first public release targets Linux x86_64. macOS and Windows are untested and not advertised. Versions follow SemVer; while fio is 0.x, the CLI and record format may change between minor versions, and changes are listed in the release notes. Records are plain Markdown and stay editable by hand. Licensed under MIT.
 
+## Install a release binary
+
+Each GitHub release attaches a Linux x86_64 archive and its checksum. No Rust toolchain is required:
+
+```sh
+version=0.1.0
+base=https://github.com/chagasma/fio/releases/download/v$version
+name=fio-$version-x86_64-unknown-linux-gnu
+curl -LO $base/$name.tar.gz
+curl -LO $base/$name.tar.gz.sha256
+sha256sum --check $name.tar.gz.sha256
+tar xzf $name.tar.gz
+install -m 755 $name/fio ~/.local/bin/fio   # any directory on PATH
+fio --version
+```
+
+Make sure the target directory is on `PATH`, then run `fio init` in a workspace. To upgrade, repeat the steps with the new version and rerun `fio hooks install <agent>` in each workspace that uses hooks, because hooks record the executable path. To uninstall, run `fio hooks uninstall <agent>` in each such workspace, then delete the binary. Demand records in `.fio/` are never touched by the binary or by these commands. Optionally delete the project registry (`~/.config/fio/`) and the disposable search index (`~/.cache/fio/`).
+
 ## Install from source
 
 With Rust 1.89 or later, run this in the cloned repository:
@@ -14,7 +32,7 @@ With Rust 1.89 or later, run this in the cloned repository:
 cargo install --path . --locked
 ```
 
-Cargo installs the executable in `~/.cargo/bin/fio` (or your configured Cargo directory). Add that directory to PATH to use fio in any workspace, independently of this source checkout. Prebuilt binaries and automated releases are still pending.
+Cargo installs the executable in `~/.cargo/bin/fio` (or your configured Cargo directory). Add that directory to PATH to use fio in any workspace, independently of this source checkout.
 
 ## Use in a project
 
@@ -85,6 +103,10 @@ fio hooks install codex
 
 The installer merges fio handlers into `.claude/settings.local.json` or `.codex/hooks.json`, preserving other settings and hooks. Reinstalling replaces only fio handlers. It records the absolute path of the executable used for installation; rerun the installer after moving the executable. During source development, use `cargo run -- hooks install <agent>`; for other workspaces, install fio with Cargo first. Local hook settings should stay out of Git because they contain machine-specific paths.
 
+Remove them with `fio hooks uninstall <agent>`: it deletes only fio's handlers and keeps every other hook and setting.
+
+To onboard an agent in a workspace: run `fio init`, give the agent the instructions (the demand-context section of `AGENTS.md` for Codex, `.claude/skills/fio/` for Claude Code), install the hooks, restart the agent, approve the project hooks if it asks, and confirm the first session started with a `fio already opened local session ...` context message.
+
 Restart the agent after installation. Codex requires reviewing and trusting the project hooks through `/hooks`; fio does not change trust settings. Hooks are supported in the locally verified Codex 0.162.1 and Claude Code 2.1.296. See the official [Codex hooks](https://learn.chatgpt.com/docs/hooks) and [Claude Code hooks](https://code.claude.com/docs/en/hooks) references for current requirements.
 
 SessionStart opens or reuses a fio record using the native session ID, links the transcript path, and injects demand context and the local fio ID. New native sessions use the workspace's active demand. For a project dedicated to one demand, `fio hooks install codex --demand <id>` pins new bindings explicitly. Once bound, a native session stays with its original demand even if another agent changes the shared default. Resume reuses an open record or opens a new record for that same demand after closure. Compaction reuses the record. Hooks skip subagent events and workspaces without `.fio/`; without an active demand, they ask the agent to obtain the user's selection.
@@ -92,3 +114,18 @@ SessionStart opens or reuses a fio record using the native session ID, links the
 Stop saves the last assistant response in a separate quoted section. It requests an authored session summary at most once per turn when it has not been updated. Agents use `fio session update <local-id> --summary "Work completed and verified" --next "Remaining work"` without closing the session. SessionEnd closes only the matching native session's record. If no work summary was written, it explicitly records that completion was not verified. Hooks never automatically replace the demand's Current state or extract decisions from prose. Storage errors are reported as hook warnings and allow the agent to continue.
 
 Transcripts stay at their original paths; fio does not read or copy them. No API calls or transcript scans are required. Forced termination may prevent SessionEnd from running; use `fio session list` and close the relevant local record explicitly if needed.
+
+## Data and Git
+
+Everything lives in plain files: demand and session records in `.fio/`, the project registry in `~/.config/fio/config.toml` and a rebuildable search index in `~/.cache/fio/index.db`. Back up `.fio/` like any other source directory; deleting the index loses nothing. `.fio/state.toml`, `.fio/state.lock` and `.fio/demands/*/write.lock` are local to a machine, as are the hook settings (`.claude/settings.local.json`, `.codex/hooks.json`). Whether to commit the rest of `.fio/` is your choice; session records contain transcript paths and agent responses, so consider that before publishing a repository.
+
+## Troubleshooting
+
+- `The TUI requires an interactive terminal`: run `fio` from a terminal; use the subcommands in scripts.
+- `Set VISUAL or EDITOR`: export a terminal editor, for example `export EDITOR=nvim`.
+- `Clipboard unavailable`: copying needs a desktop session (Wayland); use `fio context` and copy from the terminal otherwise.
+- `Could not start codex` or `claude`: resuming runs the agent executable, so it must be on `PATH`.
+- `No fio project found`: run `fio init` in the workspace, or `cd` into it.
+- Warnings about unreadable records: `fio list`, `fio search`, session commands and hooks skip a malformed file and name it on stderr; fix its Markdown or frontmatter.
+- A session left open after a crash: `fio session list`, then `fio session end <local-id> --summary "What was done" --next "What remains"`.
+- Hooks silent after moving the binary: rerun `fio hooks install <agent>` to refresh its recorded path.

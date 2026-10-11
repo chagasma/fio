@@ -12,7 +12,7 @@ use crate::{
 };
 use lifecycle::{Event, HookEvent};
 
-pub use install::configure;
+pub use install::{configure, remove};
 
 pub fn handle(agent: Agent, demand: Option<DemandId>) -> Result<()> {
     // Hooks are advisory except for one bounded summary reminder on Stop.

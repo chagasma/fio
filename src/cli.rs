@@ -146,6 +146,11 @@ pub enum HooksCommand {
         #[arg(long)]
         demand: Option<DemandId>,
     },
+    /// Remove fio's hooks from the current project's agent settings
+    Uninstall {
+        #[arg(value_enum)]
+        agent: Agent,
+    },
 }
 
 #[derive(Subcommand)]
@@ -224,6 +229,9 @@ pub fn run(command: Option<Command>) -> Result<()> {
                     demand,
                 },
         } => hooks::configure(agent, executable, demand.as_ref()),
+        Command::Hooks {
+            command: HooksCommand::Uninstall { agent },
+        } => hooks::remove(agent),
         Command::Search { term, json, limit } => search(&term, json, limit),
         Command::Init { name } => {
             let workspace = Workspace::init(&std::env::current_dir()?, name.as_deref())?;

@@ -33,10 +33,7 @@ pub fn configure(
     .context("Could not resolve the fio executable")?;
     ensure!(executable.is_file(), "fio executable must be a file");
     let command = hook_command(&executable, agent, demand)?;
-    let path = workspace.root().join(match agent {
-        Agent::Claude => ".claude/settings.local.json",
-        Agent::Codex => ".codex/hooks.json",
-    });
+    let path = settings_path(&workspace, agent);
     let mut config = read_settings(&path)?;
     merge_fio_hooks(&mut config, &command)?;
     write_atomic(
@@ -48,6 +45,45 @@ pub fn configure(
         agent.name(),
         path.display()
     );
+    Ok(())
+}
+
+fn settings_path(workspace: &Workspace, agent: Agent) -> PathBuf {
+    workspace.root().join(match agent {
+        Agent::Claude => ".claude/settings.local.json",
+        Agent::Codex => ".codex/hooks.json",
+    })
+}
+
+/// Removes fio's lifecycle handlers from the workspace's agent settings,
+/// leaving every other hook and setting untouched.
+pub fn remove(agent: Agent) -> Result<()> {
+    let workspace = Workspace::locate()?;
+    let path = settings_path(&workspace, agent);
+    if !path.exists() {
+        println!(
+            "No {} hook settings found at {}",
+            agent.name(),
+            path.display()
+        );
+        return Ok(());
+    }
+    let mut config = read_settings(&path)?;
+    strip_fio_hooks(&mut config)?;
+    if config.as_object().is_some_and(serde_json::Map::is_empty) {
+        fs::remove_file(&path)?;
+        println!(
+            "{} hooks removed; deleted empty {}",
+            agent.name(),
+            path.display()
+        );
+    } else {
+        write_atomic(
+            &path,
+            &format!("{}\n", serde_json::to_string_pretty(&config)?),
+        )?;
+        println!("{} hooks removed from {}", agent.name(), path.display());
+    }
     Ok(())
 }
 
@@ -88,19 +124,44 @@ fn merge_fio_hooks(config: &mut Value, command: &str) -> Result<()> {
             .or_insert(json!([]))
             .as_array_mut()
             .context("Hook event must be an array")?;
-        // Identify only fio-owned groups; leave user commands and matchers intact.
-        groups.retain_mut(|group| {
-            let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-                return true;
-            };
-            let before = handlers.len();
-            handlers.retain(|handler| {
-                handler.get("statusMessage").and_then(Value::as_str) != Some(STATUS_MESSAGE)
-            });
-            handlers.len() == before || !handlers.is_empty()
-        });
+        remove_fio_handlers(groups);
         let timeout = if event == "SessionEnd" { 3 } else { 10 };
         groups.push(json!({"hooks":[{"type":"command","command":command,"statusMessage":STATUS_MESSAGE,"timeout":timeout}]}));
+    }
+    Ok(())
+}
+
+/// Identifies only fio-owned handlers; user commands and matchers stay intact.
+fn remove_fio_handlers(groups: &mut Vec<Value>) {
+    groups.retain_mut(|group| {
+        let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            return true;
+        };
+        let before = handlers.len();
+        handlers.retain(|handler| {
+            handler.get("statusMessage").and_then(Value::as_str) != Some(STATUS_MESSAGE)
+        });
+        handlers.len() == before || !handlers.is_empty()
+    });
+}
+
+fn strip_fio_hooks(config: &mut Value) -> Result<()> {
+    let root = config
+        .as_object_mut()
+        .context("Agent settings must be a JSON object")?;
+    let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return Ok(());
+    };
+    for event in EVENTS {
+        if let Some(groups) = hooks.get_mut(event).and_then(Value::as_array_mut) {
+            remove_fio_handlers(groups);
+            if groups.is_empty() {
+                hooks.remove(event);
+            }
+        }
+    }
+    if hooks.is_empty() {
+        root.remove("hooks");
     }
     Ok(())
 }

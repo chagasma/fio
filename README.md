@@ -8,7 +8,7 @@ The first public release targets Linux x86_64. macOS and Windows are untested an
 
 ## Install from source
 
-With Rust 1.99 or later, run this in the cloned repository:
+With Rust 1.89 or later, run this in the cloned repository:
 
 ```sh
 cargo install --path . --locked

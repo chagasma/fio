@@ -105,7 +105,6 @@ impl App {
         terminal: &mut ratatui::DefaultTerminal,
         watch: &mut Option<watch::FileWatch>,
     ) -> Result<()> {
-        self.splash(terminal)?;
         let mut redraw = true;
         let mut last_tick = Instant::now();
         loop {
@@ -169,20 +168,6 @@ impl App {
                 }
             }
         }
-        Ok(())
-    }
-
-    /// A short intro animation; any key skips it.
-    fn splash(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_millis(1000) {
-            let index = (start.elapsed().as_millis() / 150) as usize;
-            terminal.draw(|frame| ui::draw_splash(frame, index))?;
-            if event::poll(Duration::from_millis(50))? && matches!(event::read()?, Event::Key(_)) {
-                break;
-            }
-        }
-        self.started = Instant::now();
         Ok(())
     }
 

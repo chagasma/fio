@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::Modifier,
     text::{Line, Span, Text},
     widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Wrap},
 };
@@ -329,31 +329,4 @@ impl App {
         self.scroll = self.scroll.min(self.max_scroll);
         frame.render_widget(paragraph.scroll((self.scroll, 0)), area);
     }
-}
-
-/// The splash shown briefly when the TUI opens.
-pub(super) fn draw_splash(frame: &mut Frame, index: usize) {
-    let area = frame.area();
-    let height = mascot::ROWS + 3;
-    if area.height < height || area.width < mascot::COLUMNS {
-        return;
-    }
-    let top = area.y + (area.height - height) / 2;
-    mascot::render(
-        frame,
-        Rect::new(area.x, top, area.width, mascot::ROWS),
-        index,
-    );
-    let title = Paragraph::new(vec![
-        Line::from(Span::styled("fio", theme::heading())),
-        Line::from(Span::styled(
-            "demand-based context for agents",
-            Style::new().add_modifier(Modifier::DIM),
-        )),
-    ])
-    .alignment(Alignment::Center);
-    frame.render_widget(
-        title,
-        Rect::new(area.x, top + mascot::ROWS + 1, area.width, 2),
-    );
 }

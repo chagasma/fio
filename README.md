@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/fio-cat.svg" alt="fio mascot: a pixel-art cat batting a ball of yarn" width="380">
+</p>
+
 # fio
 
 A demand-based context manager for development with agents. Demands, decisions, questions, debts and session summaries live in Markdown files under `.fio/` in each workspace. People, agents and scripts can use the CLI; running `fio` opens the terminal interface.
@@ -57,7 +61,7 @@ Search uses a disposable SQLite FTS5 index at `~/.cache/fio/index.db`, respectin
 
 ## Terminal interface
 
-Projects → demands → details, with Summary, Sessions, Decisions, Questions, Debts and Docs tabs. Global views show active/blocked demands, open questions and open debts across projects. The interface supports demand actions and watches registered `.fio/` directories for changes. Live reload preserves the current demand and tab. An asterisk beside a demand ID marks the workspace’s selected default; this is independent of its status.
+The interface opens with a one-second splash (any key skips it) and follows your terminal's color theme. Projects → demands → details, with Summary, Sessions, Decisions, Questions, Debts and Docs tabs. Global views show active/blocked demands, open questions and open debts across projects. The interface supports demand actions and watches registered `.fio/` directories for changes. Live reload preserves the current demand and tab. An asterisk beside a demand ID marks the workspace’s selected default; this is independent of its status.
 
 - Enter opens the selection; Esc goes back.
 - Arrow keys or j/k move; PageUp/PageDown and Home/End navigate longer views.

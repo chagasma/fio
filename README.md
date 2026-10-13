@@ -15,7 +15,7 @@ The first public release targets Linux x86_64. macOS and Windows are untested an
 Each GitHub release attaches a Linux x86_64 archive and its checksum. No Rust toolchain is required:
 
 ```sh
-version=0.2.0
+version=0.3.0
 base=https://github.com/chagasma/fio/releases/download/v$version
 name=fio-$version-x86_64-unknown-linux-gnu
 curl -LO $base/$name.tar.gz

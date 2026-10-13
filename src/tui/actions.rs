@@ -8,7 +8,7 @@ use clap::ValueEnum;
 
 use super::{
     App, Modal,
-    screen::{Prompt, Screen, Tab},
+    screen::{NewDemand, Prompt, Screen, Tab},
 };
 use crate::{
     context::{self, DEFAULT_DECISIONS, DEFAULT_SESSIONS},
@@ -109,7 +109,29 @@ impl App {
             Screen::Demands(Some(workspace)) => workspace.clone(),
             _ => self.target()?.workspace,
         };
-        self.begin_prompt(Prompt::NewId(workspace));
+        self.begin_prompt(Prompt::NewId(NewDemand {
+            workspace,
+            parent: None,
+        }));
+        Ok(())
+    }
+
+    /// Starts a sub-demand inside the selected demand.
+    pub(super) fn begin_new_child(&mut self) -> Result<()> {
+        let parent = self.target()?;
+        let entry = self
+            .catalog
+            .find(&parent)
+            .context("Select a demand first")?;
+        ensure!(
+            entry.loaded.document.metadata.parent.is_none(),
+            "'{}' is already a sub-demand; only one level is supported",
+            parent.id
+        );
+        self.begin_prompt(Prompt::NewId(NewDemand {
+            workspace: parent.workspace,
+            parent: Some(parent.id),
+        }));
         Ok(())
     }
 
@@ -121,22 +143,29 @@ impl App {
 
     pub(super) fn submit(&mut self, prompt: &Prompt, text: &str) -> Result<()> {
         match prompt {
-            Prompt::NewId(workspace) => {
+            Prompt::NewId(target) => {
                 let id: DemandId = text.trim().parse().map_err(anyhow::Error::msg)?;
                 self.modal = Modal::Input {
-                    prompt: Prompt::NewTitle(DemandKey {
-                        workspace: workspace.clone(),
-                        id,
-                    }),
+                    prompt: Prompt::NewTitle(target.clone(), id),
                     text: String::new(),
                 };
             }
-            Prompt::NewTitle(key) => {
-                demands::create(&key.workspace()?, &key.id, text, Priority::default())?;
+            Prompt::NewTitle(target, id) => {
+                let workspace = Workspace::open(target.workspace.clone())?;
+                demands::create(
+                    &workspace,
+                    id,
+                    text,
+                    Priority::default(),
+                    target.parent.as_ref(),
+                )?;
                 self.refresh()?;
-                self.go(Screen::Detail(key.clone()));
+                self.go(Screen::Detail(DemandKey {
+                    workspace: target.workspace.clone(),
+                    id: id.clone(),
+                }));
                 self.tab = Tab::Summary;
-                self.message = format!("Demand '{}' created", key.id);
+                self.message = format!("Demand '{id}' created");
             }
             Prompt::Status(key) => {
                 let status = Status::from_str(text.trim(), true).map_err(anyhow::Error::msg)?;

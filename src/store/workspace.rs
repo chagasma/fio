@@ -95,8 +95,22 @@ impl Workspace {
         self.root.join(".fio/demands")
     }
 
+    /// Folder of a demand: top level, or inside one top-level parent.
     pub fn demand_dir(&self, id: &DemandId) -> PathBuf {
-        self.demands_dir().join(id)
+        let top = self.demands_dir().join(id);
+        if top.is_dir() {
+            return top;
+        }
+        self.find_subdemand(id).unwrap_or(top)
+    }
+
+    /// Unreadable directories count as "not found": callers get the top-level path.
+    fn find_subdemand(&self, id: &DemandId) -> Option<PathBuf> {
+        fs::read_dir(self.demands_dir())
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path().join(id))
+            .find(|path| path.join("demand.md").is_file())
     }
 
     pub fn state_file(&self) -> PathBuf {

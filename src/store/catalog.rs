@@ -63,6 +63,15 @@ impl Catalog {
         Ok(catalog)
     }
 
+    /// Sub-demands of `parent`, in folder order.
+    pub fn children_of<'a>(&'a self, parent: &'a Entry) -> impl Iterator<Item = &'a Entry> {
+        let id = parent.loaded.id();
+        self.demands.iter().filter(move |entry| {
+            entry.workspace == parent.workspace
+                && entry.loaded.document.metadata.parent.as_ref() == Some(id)
+        })
+    }
+
     pub fn find(&self, key: &DemandKey) -> Option<&Entry> {
         self.demands.iter().find(|entry| entry.key() == *key)
     }

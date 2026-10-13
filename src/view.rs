@@ -6,7 +6,7 @@ use chrono::{DateTime, FixedOffset};
 use serde::Serialize;
 
 use crate::{
-    model::{Agent, Demand, DemandId, Item, ItemKind, Session, section},
+    model::{Agent, Demand, DemandId, Item, ItemKind, Session, Status, section},
     store::{demands::LoadedDemand, markdown, sessions::SessionRecord},
 };
 
@@ -31,11 +31,23 @@ pub struct DemandView<'a> {
     pub decisions: Vec<Item>,
     pub questions: Vec<Item>,
     pub debts: Vec<Item>,
+    pub children: Vec<ChildView<'a>>,
     pub sessions: Vec<SessionView<'a>>,
 }
 
+#[derive(Serialize)]
+pub struct ChildView<'a> {
+    pub id: &'a DemandId,
+    pub title: &'a str,
+    pub status: Status,
+}
+
 impl<'a> DemandView<'a> {
-    pub fn new(demand: &'a LoadedDemand, sessions: &'a [SessionRecord]) -> Result<Self> {
+    pub fn new(
+        demand: &'a LoadedDemand,
+        sessions: &'a [SessionRecord],
+        children: &'a [LoadedDemand],
+    ) -> Result<Self> {
         let body = &demand.document.body;
         Ok(Self {
             demand: &demand.document.metadata,
@@ -46,6 +58,17 @@ impl<'a> DemandView<'a> {
             decisions: markdown::items(body, ItemKind::Decision)?,
             questions: markdown::items(body, ItemKind::Question)?,
             debts: markdown::items(body, ItemKind::Debt)?,
+            children: children
+                .iter()
+                .map(|child| {
+                    let child = &child.document.metadata;
+                    ChildView {
+                        id: &child.id,
+                        title: &child.title,
+                        status: child.status,
+                    }
+                })
+                .collect(),
             sessions: sessions
                 .iter()
                 .map(|record| SessionView {

@@ -129,6 +129,18 @@ impl Status {
     pub fn next_filter(current: Option<Self>) -> Option<Self> {
         cycle(&Self::ALL, current)
     }
+
+    pub fn is_closed(self) -> bool {
+        matches!(self, Self::Done | Self::Archived)
+    }
+
+    /// "done/total" over a set of statuses.
+    pub fn progress(statuses: impl IntoIterator<Item = Self>) -> String {
+        let (done, total) = statuses.into_iter().fold((0, 0), |(done, total), status| {
+            (done + usize::from(status.is_closed()), total + 1)
+        });
+        format!("{done}/{total}")
+    }
 }
 
 impl fmt::Display for Status {
@@ -236,6 +248,9 @@ pub struct Demand {
     pub status: Status,
     #[serde(default)]
     pub priority: Priority,
+    /// Set for sub-demands, which live in the folder of their parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<DemandId>,
     pub created: NaiveDate,
     pub updated: NaiveDate,
     #[serde(default)]

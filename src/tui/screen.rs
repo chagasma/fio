@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use ratatui::text::Text;
 
 use crate::{
-    model::{ItemKind, Status},
+    model::{DemandId, ItemKind, Status},
     store::catalog::DemandKey,
 };
 
@@ -96,10 +96,17 @@ pub struct Row {
     pub tab: Tab,
 }
 
+/// Where a demand being created goes: a workspace, and optionally a parent demand.
+#[derive(Clone)]
+pub struct NewDemand {
+    pub workspace: PathBuf,
+    pub parent: Option<DemandId>,
+}
+
 /// A text entry in progress, with whatever it needs to complete.
 pub enum Prompt {
-    NewId(PathBuf),
-    NewTitle(DemandKey),
+    NewId(NewDemand),
+    NewTitle(NewDemand, DemandId),
     Status(DemandKey),
     Search,
     Command,
@@ -108,8 +115,12 @@ pub enum Prompt {
 impl Prompt {
     pub fn label(&self) -> String {
         match self {
-            Self::NewId(_) => "New demand ID: ".into(),
-            Self::NewTitle(_) => "New demand title: ".into(),
+            Self::NewId(NewDemand { parent: None, .. }) => "New demand ID: ".into(),
+            Self::NewId(NewDemand {
+                parent: Some(parent),
+                ..
+            }) => format!("New sub-demand ID (in {parent}): "),
+            Self::NewTitle(..) => "New demand title: ".into(),
             Self::Status(_) => {
                 let names: Vec<_> = Status::ALL.iter().map(|status| status.name()).collect();
                 format!("Status ({}): ", names.join("/"))

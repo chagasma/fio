@@ -9,7 +9,7 @@ use chrono::{DateTime, FixedOffset, NaiveDate};
 use serde::Serialize;
 
 use crate::{
-    model::{Agent, Item, ItemKind, Priority, Status, section},
+    model::{Agent, DemandId, Item, ItemKind, Priority, Status, section},
     store::{
         demands::{self, LoadedDemand},
         markdown,
@@ -25,6 +25,8 @@ pub const DEFAULT_DECISIONS: usize = 10;
 #[derive(Serialize)]
 pub struct ContextPackage<'a> {
     pub id: &'a str,
+    pub parent: Option<&'a str>,
+    pub sub_demands: Vec<Relation>,
     pub title: &'a str,
     pub project: &'a str,
     pub status: Status,
@@ -77,6 +79,20 @@ pub fn build<'a>(
     records.sort_by(|a, b| (a.metadata().started, &a.path).cmp(&(b.metadata().started, &b.path)));
     Ok(ContextPackage {
         id: metadata.id.as_str(),
+        parent: metadata.parent.as_ref().map(DemandId::as_str),
+        sub_demands: demands::children(workspace, demand)?
+            .into_iter()
+            .map(|child| {
+                let child = child.document.metadata;
+                Relation {
+                    path: workspace.demand_dir(&child.id).join("demand.md"),
+                    id: child.id.into(),
+                    title: Some(child.title),
+                    status: Some(child.status),
+                    note: None,
+                }
+            })
+            .collect(),
         title: &metadata.title,
         project: &metadata.project,
         status: metadata.status,
@@ -149,7 +165,13 @@ fn relation(workspace: &Workspace, id: &str) -> Relation {
             id: id.to_owned(),
             title: None,
             status: None,
-            path: workspace.demands_dir().join(id).join("demand.md"),
+            path: id
+                .parse()
+                .map_or_else(
+                    |_| workspace.demands_dir().join(id),
+                    |parsed| workspace.demand_dir(&parsed),
+                )
+                .join("demand.md"),
             note: Some(error.to_string()),
         },
     }
@@ -169,6 +191,9 @@ impl ContextPackage<'_> {
             "# {} — {}\n\nProject: {}\nStatus: {}\n",
             self.id, self.title, self.project, self.status
         )?;
+        if let Some(parent) = self.parent {
+            writeln!(out, "Parent: {parent}")?;
+        }
         text_section(out, "Objective", &self.objective)?;
         text_section(out, "Current state", &self.current_state)?;
         item_section(out, "Open questions", &self.questions)?;
@@ -176,6 +201,15 @@ impl ContextPackage<'_> {
         item_section(out, "Open debts", &self.debts)?;
         session_section(out, &self.sessions)?;
         document_section(out, &self.docs)?;
+        if !self.sub_demands.is_empty() {
+            let progress =
+                Status::progress(self.sub_demands.iter().filter_map(|child| child.status));
+            relation_section(
+                out,
+                &format!("Sub-demands ({progress} done)"),
+                &self.sub_demands,
+            )?;
+        }
         relation_section(out, "Related demands", &self.related)?;
         relation_section(out, "Blocked by", &self.blocked_by)?;
         if !self.links.is_empty() {

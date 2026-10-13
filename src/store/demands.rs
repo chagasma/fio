@@ -36,7 +36,11 @@ pub struct DemandSummary {
 }
 
 pub fn load(workspace: &Workspace, id: &DemandId) -> Result<LoadedDemand> {
-    let path = workspace.demand_dir(id).join("demand.md");
+    load_from(workspace, id, &workspace.demand_dir(id))
+}
+
+fn load_from(workspace: &Workspace, id: &DemandId, folder: &Path) -> Result<LoadedDemand> {
+    let path = folder.join("demand.md");
     let source = fs::read_to_string(&path).with_context(|| {
         format!(
             "Could not read demand '{id}' in {}",
@@ -55,6 +59,16 @@ pub fn load(workspace: &Workspace, id: &DemandId) -> Result<LoadedDemand> {
         "Frontmatter project does not match the workspace: {}",
         path.display()
     );
+    let expected_parent = folder
+        .parent()
+        .filter(|parent| *parent != workspace.demands_dir())
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str());
+    ensure!(
+        document.metadata.parent.as_ref().map(DemandId::as_str) == expected_parent,
+        "Frontmatter parent does not match the directory: {}",
+        path.display()
+    );
     Ok(LoadedDemand { path, document })
 }
 
@@ -67,8 +81,35 @@ pub fn load_for_update(workspace: &Workspace, id: &DemandId) -> Result<LockedDem
     })
 }
 
-pub fn create(workspace: &Workspace, id: &DemandId, title: &str, priority: Priority) -> Result<()> {
+/// Creates a demand, or a sub-demand inside `parent` (one level only).
+pub fn create(
+    workspace: &Workspace,
+    id: &DemandId,
+    title: &str,
+    priority: Priority,
+    parent: Option<&DemandId>,
+) -> Result<()> {
     markdown::single_line(title)?;
+    ensure!(
+        id.as_str() != "sessions",
+        "'sessions' is reserved for session records"
+    );
+    ensure!(
+        !workspace.demand_dir(id).exists(),
+        "Demand '{id}' already exists"
+    );
+    let folder = match parent {
+        Some(parent) => {
+            let parent = load(workspace, parent)?;
+            ensure!(
+                parent.document.metadata.parent.is_none(),
+                "'{}' is already a sub-demand; only one level is supported",
+                parent.id()
+            );
+            parent.folder().join(id)
+        }
+        None => workspace.demands_dir().join(id),
+    };
     let today = today();
     let demand = Demand {
         id: id.clone(),
@@ -76,6 +117,7 @@ pub fn create(workspace: &Workspace, id: &DemandId, title: &str, priority: Prior
         project: workspace.name().to_owned(),
         status: Status::default(),
         priority,
+        parent: parent.cloned(),
         created: today,
         updated: today,
         links: BTreeMap::new(),
@@ -92,33 +134,54 @@ pub fn create(workspace: &Workspace, id: &DemandId, title: &str, priority: Prior
         write!(body, "\n## {title}\n")?;
     }
     let document = Document::new(demand, body)?;
-    let folder = workspace.demand_dir(id);
-    fs::create_dir(&folder).with_context(|| {
-        format!("Could not create '{id}'; check whether the demand already exists")
-    })?;
+    fs::create_dir(&folder).with_context(|| format!("Could not create '{id}'"))?;
     store_fs::write_atomic(&folder.join("demand.md"), &document.render())
 }
 
-/// Reads every demand in the workspace; unreadable ones become warnings.
+/// Reads every demand in the workspace, each followed by its sub-demands;
+/// unreadable ones become warnings.
 pub fn scan(workspace: &Workspace) -> Result<Scan<LoadedDemand>> {
     let mut result = Scan::default();
     for path in store_fs::read_dir_sorted(&workspace.demands_dir())? {
         if !path.is_dir() {
             continue;
         }
-        let id = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("Demand directory name must be UTF-8")
-            .and_then(|name| name.parse::<DemandId>().map_err(anyhow::Error::msg));
-        match id.and_then(|id| load(workspace, &id)) {
-            Ok(loaded) => result.items.push(loaded),
-            Err(error) => result
-                .warnings
-                .push(format!("{}: {error:#}", path.display())),
+        load_folder(workspace, &path, &mut result);
+        let children = scan_children(workspace, &path)?;
+        result.items.extend(children.items);
+        result.warnings.extend(children.warnings);
+    }
+    Ok(result)
+}
+
+fn load_folder(workspace: &Workspace, path: &Path, result: &mut Scan<LoadedDemand>) {
+    let id = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Demand directory name must be UTF-8")
+        .and_then(|name| name.parse::<DemandId>().map_err(anyhow::Error::msg));
+    match id.and_then(|id| load_from(workspace, &id, path)) {
+        Ok(loaded) => result.items.push(loaded),
+        Err(error) => result
+            .warnings
+            .push(format!("{}: {error:#}", path.display())),
+    }
+}
+
+/// Sub-demands inside a top-level demand folder: subfolders holding a `demand.md`.
+fn scan_children(workspace: &Workspace, folder: &Path) -> Result<Scan<LoadedDemand>> {
+    let mut result = Scan::default();
+    for path in store_fs::read_dir_sorted(folder)? {
+        if path.join("demand.md").is_file() {
+            load_folder(workspace, &path, &mut result);
         }
     }
     Ok(result)
+}
+
+/// Sub-demands of `parent`, in folder order.
+pub fn children(workspace: &Workspace, parent: &LoadedDemand) -> Result<Vec<LoadedDemand>> {
+    Ok(scan_children(workspace, parent.folder())?.items)
 }
 
 /// Demands of one workspace, optionally filtered by status.

@@ -106,6 +106,7 @@ impl App {
     fn navigate(&mut self, key: KeyCode) -> Result<()> {
         match key {
             KeyCode::Char('n') => self.begin_new()?,
+            KeyCode::Char('N') => self.begin_new_child()?,
             KeyCode::Char('s') => self.begin_status()?,
             KeyCode::Char('u') => self.use_selected()?,
             KeyCode::Char('c') => self.copy_context()?,

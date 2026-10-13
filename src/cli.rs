@@ -66,6 +66,9 @@ pub enum Command {
         title: String,
         #[arg(long, value_enum, default_value = "medium")]
         priority: Priority,
+        /// Create it as a sub-demand inside this top-level demand
+        #[arg(long)]
+        parent: Option<DemandId>,
     },
     /// List demands in the current workspace or across all projects
     List {
@@ -233,15 +236,7 @@ pub fn run(command: Option<Command>) -> Result<()> {
             command: HooksCommand::Uninstall { agent },
         } => hooks::remove(agent),
         Command::Search { term, json, limit } => search(&term, json, limit),
-        Command::Init { name } => {
-            let workspace = Workspace::init(&std::env::current_dir()?, name.as_deref())?;
-            println!(
-                "Project '{}' initialized in {}",
-                workspace.name(),
-                workspace.root().display()
-            );
-            Ok(())
-        }
+        Command::Init { name } => init(name.as_deref()),
         Command::Projects { json } => emit(json, &registry::projects()?, |projects| {
             for project in projects {
                 println!("{}\t{}", project.name, project.workspace.display());
@@ -256,8 +251,15 @@ pub fn run(command: Option<Command>) -> Result<()> {
             id,
             title,
             priority,
+            parent,
         } => {
-            demands::create(&Workspace::locate()?, &id, &title, priority)?;
+            demands::create(
+                &Workspace::locate()?,
+                &id,
+                &title,
+                priority,
+                parent.as_ref(),
+            )?;
             println!("Demand '{id}' created");
             Ok(())
         }
@@ -312,6 +314,16 @@ pub fn run(command: Option<Command>) -> Result<()> {
     }
 }
 
+fn init(name: Option<&str>) -> Result<()> {
+    let workspace = Workspace::init(&std::env::current_dir()?, name)?;
+    println!(
+        "Project '{}' initialized in {}",
+        workspace.name(),
+        workspace.root().display()
+    );
+    Ok(())
+}
+
 fn search(term: &str, json: bool, limit: usize) -> Result<()> {
     let catalog = Catalog::load()?;
     warn(&catalog.warnings);
@@ -332,12 +344,24 @@ fn search(term: &str, json: bool, limit: usize) -> Result<()> {
 }
 
 fn show(id: &DemandId, json: bool) -> Result<()> {
-    let demand = demands::load(&Workspace::locate()?, id)?;
+    let workspace = Workspace::locate()?;
+    let demand = demands::load(&workspace, id)?;
+    let children = demands::children(&workspace, &demand)?;
     if json {
         let sessions = sessions::read(&demand)?;
-        print_json(&DemandView::new(&demand, &sessions)?)
+        print_json(&DemandView::new(&demand, &sessions, &children)?)
     } else {
         print!("{}", demand.document.render());
+        if !children.is_empty() {
+            println!(
+                "\n## Sub-demands ({} done)",
+                Status::progress(children.iter().map(|child| child.document.metadata.status))
+            );
+            for child in &children {
+                let child = &child.document.metadata;
+                println!("- {} [{}] {}", child.id, child.status, child.title);
+            }
+        }
         Ok(())
     }
 }
@@ -363,8 +387,13 @@ fn list(status: Option<Status>, all_projects: bool, json: bool) -> Result<()> {
     }
     emit(json, &summaries, |summaries| {
         for entry in summaries {
+            let marker = if entry.demand.parent.is_some() {
+                "└ "
+            } else {
+                ""
+            };
             println!(
-                "{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{marker}{}",
                 entry.demand.project, entry.demand.id, entry.demand.status, entry.demand.title
             );
         }

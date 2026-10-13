@@ -149,7 +149,7 @@ impl fmt::Display for Status {
     }
 }
 
-#[derive(Clone, Copy, Default, Deserialize, Serialize, ValueEnum, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, ValueEnum, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
     Low,
@@ -293,4 +293,88 @@ pub struct Item {
     pub id: Option<String>,
     pub done: bool,
     pub text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demand_id_accepts_valid_ids() {
+        for id in ["a", "fix-login", "feature_2", "9lives", &"a".repeat(128)] {
+            assert!(id.parse::<DemandId>().is_ok(), "{id}");
+        }
+    }
+
+    #[test]
+    fn demand_id_rejects_invalid_ids() {
+        for id in ["", "-a", "_a", "a b", "a/b", "..", "ação", &"a".repeat(129)] {
+            assert!(id.parse::<DemandId>().is_err(), "{id}");
+        }
+    }
+
+    #[test]
+    fn demand_id_is_validated_when_deserialized() {
+        assert!(serde_json::from_str::<DemandId>("\"ok-id\"").is_ok());
+        assert!(serde_json::from_str::<DemandId>("\"../escape\"").is_err());
+    }
+
+    #[test]
+    fn status_filter_cycles_through_all_then_none() {
+        let expected = [
+            Status::Backlog,
+            Status::Active,
+            Status::Paused,
+            Status::Blocked,
+            Status::Done,
+            Status::Archived,
+        ];
+        let mut seen = Vec::new();
+        let mut current = None;
+        while let Some(next) = Status::next_filter(current) {
+            seen.push(next);
+            current = Some(next);
+        }
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn priority_filter_cycles_from_high_to_low() {
+        let mut seen = Vec::new();
+        let mut current = None;
+        while let Some(next) = Priority::next_filter(current) {
+            seen.push(next);
+            current = Some(next);
+        }
+        assert_eq!(seen, [Priority::High, Priority::Medium, Priority::Low]);
+    }
+
+    #[test]
+    fn progress_counts_done_and_archived_as_closed() {
+        let statuses = [
+            Status::Done,
+            Status::Archived,
+            Status::Active,
+            Status::Backlog,
+        ];
+        assert_eq!(Status::progress(statuses), "2/4");
+        assert_eq!(Status::progress([]), "0/0");
+    }
+
+    #[test]
+    fn item_kind_owns_only_its_numbered_ids() {
+        assert!(ItemKind::Question.owns("Q12"));
+        assert!(ItemKind::Debt.owns("D1"));
+        assert!(ItemKind::Decision.owns("DEC3"));
+        assert!(!ItemKind::Debt.owns("DEC3"));
+        assert!(!ItemKind::Question.owns("Q"));
+        assert!(!ItemKind::Question.owns("Q1a"));
+    }
+
+    #[test]
+    fn only_decisions_have_no_checkbox() {
+        assert!(!ItemKind::Decision.has_checkbox());
+        assert!(ItemKind::Question.has_checkbox());
+        assert!(ItemKind::Debt.has_checkbox());
+    }
 }

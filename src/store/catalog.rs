@@ -31,8 +31,12 @@ pub struct Entry {
 impl Catalog {
     /// Loads every registered project; unreadable ones become warnings.
     pub fn load() -> Result<Self> {
+        Ok(Self::from_projects(registry::projects()?))
+    }
+
+    pub fn from_projects(projects: Vec<RegisteredProject>) -> Self {
         let mut catalog = Self {
-            projects: registry::projects()?,
+            projects,
             demands: Vec::new(),
             warnings: Vec::new(),
             active: BTreeMap::new(),
@@ -60,7 +64,7 @@ impl Catalog {
                     .push(format!("{}: {error:#}", registration.name)),
             }
         }
-        Ok(catalog)
+        catalog
     }
 
     /// Sub-demands of `parent`, in folder order.

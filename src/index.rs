@@ -51,8 +51,13 @@ impl Index {
         let dirs =
             ProjectDirs::from("", "", "fio").context("Could not locate the cache directory")?;
         fs::create_dir_all(dirs.cache_dir())?;
-        let mut connection = Connection::open(dirs.cache_dir().join("index.db"))?;
+        let connection = Connection::open(dirs.cache_dir().join("index.db"))?;
         connection.busy_timeout(Duration::from_secs(5))?;
+        Self::build(catalog, connection)
+    }
+
+    /// Replaces the contents of `connection` with the demands and sessions of `catalog`.
+    pub fn build(catalog: &Catalog, mut connection: Connection) -> Result<Self> {
         let transaction = connection.transaction()?;
         transaction.execute_batch("DROP TABLE IF EXISTS documents; CREATE VIRTUAL TABLE documents USING fts5(workspace UNINDEXED, project, demand, title, kind UNINDEXED, path UNINDEXED, content, tokenize='unicode61 remove_diacritics 2');")?;
         {

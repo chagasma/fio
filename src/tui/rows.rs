@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{fmt::Write, path::Path};
 
 use anyhow::Result;
 use ratatui::{
@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     index::HitKind,
-    model::{DemandId, ItemKind, Status, section},
+    model::{Demand, DemandId, ItemKind, Status, section},
     store::{
         catalog::{DemandKey, Entry},
         markdown, sessions,
@@ -86,8 +86,9 @@ impl App {
             .demands
             .iter()
             .map(|entry| {
-                let demand = &entry.loaded.document.metadata;
-                demand.project.chars().count() + 1 + demand.id.as_str().chars().count()
+                display_name(&entry.loaded.document.metadata)
+                    .chars()
+                    .count()
             })
             .max()
             .unwrap_or(0);
@@ -108,7 +109,7 @@ impl App {
                 _ => (),
             }
             let is_default = self.catalog.active.get(&entry.workspace) == Some(&demand.id);
-            let name = format!("{}/{}", demand.project, demand.id);
+            let name = display_name(demand);
             let mut prefix = vec![
                 Span::styled(format!("{name:<name_width$}"), theme::heading()),
                 if is_default {
@@ -164,6 +165,29 @@ impl App {
         rows
     }
 
+    /// Parent and sub-demand lines for the summary tab.
+    fn family(&self, entry: &Entry) -> String {
+        let demand = &entry.loaded.document.metadata;
+        let children: Vec<_> = self.catalog.children_of(entry).collect();
+        let mut text = String::new();
+        if let Some(parent) = &demand.parent {
+            let _ = write!(text, "\n\nParent: {parent}");
+        }
+        if !children.is_empty() {
+            let progress = Status::progress(
+                children
+                    .iter()
+                    .map(|child| child.loaded.document.metadata.status),
+            );
+            let _ = write!(text, "\n\nSub-demands ({progress} done)");
+            for child in children {
+                let child = &child.loaded.document.metadata;
+                let _ = write!(text, "\n{} [{}] {}", child.id, child.status, child.title);
+            }
+        }
+        text
+    }
+
     /// Text shown for the current tab of a demand.
     pub(super) fn detail_text(&self, entry: &Entry) -> Result<String> {
         let loaded = &entry.loaded;
@@ -173,27 +197,29 @@ impl App {
             return markdown::section_text(body, kind.section());
         }
         Ok(match self.tab {
-            Tab::Summary => format!(
-                "{} / {}\n{}\nStatus: {}    Priority: {}\nCreated: {}    Updated: {}\n\nObjective\n{}\n\nCurrent state\n{}\n\nLinks\n{}\n\nRelated: {}\nBlocked by: {}\n\n{}",
-                demand.project,
-                demand.id,
-                demand.title,
-                demand.status,
-                demand.priority,
-                demand.created,
-                demand.updated,
-                markdown::section_text(body, section::OBJECTIVE)?,
-                markdown::section_text(body, section::CURRENT_STATE)?,
-                demand
-                    .links
-                    .iter()
-                    .map(|(key, value)| format!("{key}: {value}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                demand.related.join(", "),
-                demand.blocked_by.join(", "),
-                loaded.path.display()
-            ),
+            Tab::Summary => {
+                format!(
+                    "{} / {}\n{}\nStatus: {}    Priority: {}\nCreated: {}    Updated: {}\n\nObjective\n{}\n\nCurrent state\n{}\n\nLinks\n{}\n\nRelated: {}\nBlocked by: {}\n\n{}",
+                    demand.project,
+                    demand.id,
+                    demand.title,
+                    demand.status,
+                    demand.priority,
+                    demand.created,
+                    demand.updated,
+                    markdown::section_text(body, section::OBJECTIVE)?,
+                    markdown::section_text(body, section::CURRENT_STATE)?,
+                    demand
+                        .links
+                        .iter()
+                        .map(|(key, value)| format!("{key}: {value}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    demand.related.join(", "),
+                    demand.blocked_by.join(", "),
+                    loaded.path.display()
+                ) + &self.family(entry)
+            }
             Tab::Sessions => sessions::read(loaded)?
                 .iter()
                 .rev()
@@ -225,6 +251,15 @@ impl App {
                 .collect::<Vec<_>>()
                 .join("\n"),
         })
+    }
+}
+
+/// Label of a demand in lists: sub-demands are indented under their parent.
+fn display_name(demand: &Demand) -> String {
+    if let Some(parent) = &demand.parent {
+        format!("  └ {}/{}", parent, demand.id)
+    } else {
+        format!("{}/{}", demand.project, demand.id)
     }
 }
 

@@ -32,6 +32,7 @@ Linked document contents and agent transcripts are not indexed.
 
 Actions
 n: new demand (select its project first)
+N: new sub-demand inside the selected demand
 s: set selected demand status   u: use as active demand
 c: copy context   e: open file in VISUAL / EDITOR
 r: choose an agent session to resume
@@ -290,6 +291,7 @@ impl App {
             let mut hints = Vec::new();
             for (key, what) in [
                 ("n", "new"),
+                ("N", "sub"),
                 ("s", "status"),
                 ("u", "active"),
                 ("c", "copy"),

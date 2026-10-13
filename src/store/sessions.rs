@@ -155,7 +155,7 @@ pub fn start_unlocked(workspace: &Workspace, options: StartOptions) -> Result<Se
     if let Some(objective) = options.objective {
         markdown::set_section(&mut document.body, section::SESSION_OBJECTIVE, &objective)?;
     }
-    let local_id = format!(
+    let base = format!(
         "{}-{}-{:08x}-{}",
         started.format("%Y-%m-%d-%H%M"),
         options.agent.name(),
@@ -164,17 +164,26 @@ pub fn start_unlocked(workspace: &Workspace, options: StartOptions) -> Result<Se
     );
     let folder = workspace.demand_dir(&id).join("sessions");
     fs::create_dir_all(&folder)?;
-    let path = folder.join(format!("{local_id}.md"));
-    ensure!(
-        !path.exists(),
-        "A record with this session ID already exists; try again"
-    );
+    let (local_id, path) = unused_record(&folder, &base);
     store_fs::write_atomic(&path, &document.render())?;
     Ok(SessionHandle {
         id: local_id,
         demand: id,
         path,
     })
+}
+
+/// A record name under `folder` that is not taken yet: `base`, else `base-2`, `base-3`...
+/// Callers must hold the [`WorkspaceLock`].
+fn unused_record(folder: &Path, base: &str) -> (String, PathBuf) {
+    let mut id = base.to_owned();
+    let mut attempt = 1;
+    while folder.join(format!("{id}.md")).exists() {
+        attempt += 1;
+        id = format!("{base}-{attempt}");
+    }
+    let path = folder.join(format!("{id}.md"));
+    (id, path)
 }
 
 /// Open sessions, optionally restricted to one demand, plus warnings for unreadable records.

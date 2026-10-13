@@ -237,3 +237,226 @@ fn close_record(mut record: SessionRecord) -> Result<Option<Value>> {
     record.save()?;
     Ok(None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{
+        sessions::Notes,
+        testing::{TempWorkspace, assert_err, id},
+    };
+
+    fn event(kind: &str, extra: &Value) -> Event {
+        let mut value = json!({"session_id": "native-1", "cwd": "/", "hook_event_name": kind});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn fire(temp: &TempWorkspace, kind: &str, extra: &Value) -> Result<Option<Value>> {
+        process(&temp.workspace, Agent::Claude, &event(kind, extra), None)
+    }
+
+    fn fire_for(temp: &TempWorkspace, kind: &str, demand: &str) -> Result<Option<Value>> {
+        let event = event(kind, &json!({"source": "startup"}));
+        process(&temp.workspace, Agent::Claude, &event, Some(id(demand)))
+    }
+
+    fn records(temp: &TempWorkspace) -> Vec<SessionRecord> {
+        let mut all = sessions::scan(&temp.workspace).unwrap().items;
+        all.sort_by(|a, b| a.id.cmp(&b.id));
+        all
+    }
+
+    fn context_of(output: Option<Value>) -> String {
+        output.unwrap()["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn record_summary(temp: &TempWorkspace, text: &str) {
+        let open = &records(temp)[0];
+        let notes = Notes {
+            summary: Some(text.to_owned()),
+            ..Notes::default()
+        };
+        sessions::update(&temp.workspace, &open.id, &notes).unwrap();
+    }
+
+    fn blocked(output: Option<&Value>) -> bool {
+        output
+            .as_ref()
+            .is_some_and(|value| value["decision"] == "block")
+    }
+
+    #[test]
+    fn session_start_without_a_demand_asks_the_agent_to_choose() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let text = context_of(fire(&temp, "SessionStart", &json!({"source": "startup"})).unwrap());
+        assert!(text.contains("No active demand"));
+        assert!(text.contains("--session-id native-1"));
+        assert!(records(&temp).is_empty());
+    }
+
+    #[test]
+    fn session_start_links_a_pinned_demand_and_injects_context() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let text = context_of(fire_for(&temp, "SessionStart", "a").unwrap());
+        let all = records(&temp);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].metadata().session_id.as_deref(), Some("native-1"));
+        assert!(text.contains(&format!("local session '{}'", all[0].id)));
+        assert!(text.contains("# a — Title"));
+    }
+
+    #[test]
+    fn session_start_falls_back_to_the_active_demand() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        state::select(&temp.workspace, &id("a")).unwrap();
+        fire(&temp, "SessionStart", &json!({"source": "startup"})).unwrap();
+        assert_eq!(records(&temp)[0].metadata().demand, id("a"));
+    }
+
+    #[test]
+    fn session_start_reuses_the_open_record() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        fire_for(&temp, "SessionStart", "a").unwrap();
+        fire_for(&temp, "SessionStart", "a").unwrap();
+        assert_eq!(records(&temp).len(), 1);
+    }
+
+    #[test]
+    fn session_start_refuses_to_move_a_native_session_to_another_demand() {
+        let temp = TempWorkspace::with_demands(&["a", "b"]);
+        fire_for(&temp, "SessionStart", "a").unwrap();
+        assert_err(
+            fire_for(&temp, "SessionStart", "b"),
+            "already linked to 'a'",
+        );
+    }
+
+    #[test]
+    fn a_new_start_reopens_a_closed_native_session_but_a_clear_does_not() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        fire_for(&temp, "SessionStart", "a").unwrap();
+        fire(&temp, "SessionEnd", &json!({})).unwrap();
+        let other = fire(&temp, "SessionStart", &json!({"source": "clear"})).unwrap();
+        assert!(other.is_none());
+        assert_eq!(records(&temp).len(), 1);
+        fire(&temp, "SessionStart", &json!({"source": "resume"})).unwrap();
+        assert_eq!(records(&temp).len(), 2);
+    }
+
+    #[test]
+    fn events_from_subagents_are_ignored() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let output = fire(&temp, "SessionStart", &json!({"agent_id": "sub-1"})).unwrap();
+        assert!(output.is_none());
+        assert!(records(&temp).is_empty());
+    }
+
+    #[test]
+    fn a_missing_native_session_id_is_an_error() {
+        let temp = TempWorkspace::new();
+        let result = fire(&temp, "Stop", &json!({"session_id": " "}));
+        assert_err(result, "Missing native session ID");
+    }
+
+    #[test]
+    fn duplicate_open_records_for_one_native_session_are_an_error() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        for _ in 0..2 {
+            let options = StartOptions {
+                agent: Agent::Claude,
+                demand: Some(id("a")),
+                objective: None,
+                session_id: Some("native-1".into()),
+                transcript: None,
+            };
+            sessions::start(&temp.workspace, options).unwrap();
+        }
+        assert_err(fire(&temp, "Stop", &json!({})), "Multiple open fio records");
+    }
+
+    #[test]
+    fn stop_without_a_summary_blocks_once() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        fire_for(&temp, "SessionStart", "a").unwrap();
+        let first = fire(&temp, "Stop", &json!({})).unwrap();
+        assert!(blocked(first.as_ref()));
+        let reason = first.unwrap()["reason"].as_str().unwrap().to_owned();
+        assert!(reason.contains(&records(&temp)[0].id));
+        let retry = fire(&temp, "Stop", &json!({"stop_hook_active": true})).unwrap();
+        assert!(retry.is_none());
+    }
+
+    #[test]
+    fn stop_accepts_a_recorded_summary_and_blocks_again_when_it_goes_stale() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        fire_for(&temp, "SessionStart", "a").unwrap();
+        record_summary(&temp, "First");
+        assert!(!blocked(fire(&temp, "Stop", &json!({})).unwrap().as_ref()));
+        assert!(blocked(fire(&temp, "Stop", &json!({})).unwrap().as_ref()));
+        record_summary(&temp, "Second");
+        assert!(!blocked(fire(&temp, "Stop", &json!({})).unwrap().as_ref()));
+    }
+
+    #[test]
+    fn stop_quotes_the_last_response_so_it_cannot_create_sections() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        fire_for(&temp, "SessionStart", "a").unwrap();
+        let message = json!({"last_assistant_message": "## Injected\n- [ ] D1: fake"});
+        fire(&temp, "Stop", &message).unwrap();
+        let record = &records(&temp)[0];
+        let saved = record.text(section::LAST_AGENT_RESPONSE).unwrap();
+        assert_eq!(saved, "> ## Injected\n> - [ ] D1: fake");
+        assert_eq!(record.text("Injected").unwrap(), "");
+    }
+
+    #[test]
+    fn hooks_record_the_transcript_path() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        fire_for(&temp, "SessionStart", "a").unwrap();
+        fire(&temp, "Stop", &json!({"transcript_path": "/tmp/t.jsonl"})).unwrap();
+        assert_eq!(
+            records(&temp)[0].metadata().transcript.as_deref(),
+            Some("/tmp/t.jsonl")
+        );
+    }
+
+    #[test]
+    fn session_end_closes_the_record_and_flags_a_missing_summary() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        fire_for(&temp, "SessionStart", "a").unwrap();
+        fire(&temp, "SessionEnd", &json!({})).unwrap();
+        let record = &records(&temp)[0];
+        assert!(!record.is_open());
+        assert!(
+            record
+                .text(section::WORK_COMPLETED)
+                .unwrap()
+                .contains("completion has not been verified")
+        );
+    }
+
+    #[test]
+    fn session_end_keeps_an_authored_summary() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        fire_for(&temp, "SessionStart", "a").unwrap();
+        record_summary(&temp, "Real work");
+        fire(&temp, "SessionEnd", &json!({})).unwrap();
+        let record = &records(&temp)[0];
+        assert!(!record.is_open());
+        assert_eq!(record.text(section::WORK_COMPLETED).unwrap(), "Real work");
+    }
+
+    #[test]
+    fn events_without_an_open_record_do_nothing() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        assert!(fire(&temp, "Stop", &json!({})).unwrap().is_none());
+        assert!(fire(&temp, "SessionEnd", &json!({})).unwrap().is_none());
+    }
+}

@@ -165,3 +165,139 @@ fn strip_fio_hooks(config: &mut Value) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COMMAND: &str = "/usr/bin/fio hook claude";
+
+    fn merged(mut config: Value) -> Value {
+        merge_fio_hooks(&mut config, COMMAND).unwrap();
+        config
+    }
+
+    fn fio_handlers(config: &Value, event: &str) -> usize {
+        config["hooks"][event]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|group| group["hooks"].as_array().unwrap())
+            .filter(|handler| handler["statusMessage"] == STATUS_MESSAGE)
+            .count()
+    }
+
+    #[test]
+    fn merge_installs_every_lifecycle_event() {
+        let config = merged(json!({}));
+        for event in EVENTS {
+            assert_eq!(fio_handlers(&config, event), 1, "{event}");
+        }
+        let handler = &config["hooks"]["SessionEnd"][0]["hooks"][0];
+        assert_eq!(handler["command"], COMMAND);
+        assert_eq!(handler["timeout"], 3);
+        assert_eq!(config["hooks"]["Stop"][0]["hooks"][0]["timeout"], 10);
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let once = merged(json!({}));
+        assert_eq!(merged(once.clone()), once);
+    }
+
+    #[test]
+    fn merge_keeps_user_hooks_and_settings() {
+        let user = json!({"hooks":[{"type":"command","command":"echo hi"}]});
+        let config = merged(json!({"model": "x", "hooks": {"Stop": [user.clone()]}}));
+        assert_eq!(config["model"], "x");
+        assert_eq!(config["hooks"]["Stop"][0], user);
+        assert_eq!(fio_handlers(&config, "Stop"), 1);
+    }
+
+    #[test]
+    fn merge_replaces_an_outdated_fio_command() {
+        let old = json!({"hooks": {"Stop": [{"hooks":[{"type":"command","command":"old","statusMessage":STATUS_MESSAGE}]}]}});
+        let config = merged(old);
+        assert_eq!(fio_handlers(&config, "Stop"), 1);
+        assert_eq!(config["hooks"]["Stop"][0]["hooks"][0]["command"], COMMAND);
+    }
+
+    #[test]
+    fn merge_rejects_unexpected_shapes() {
+        let mut array = json!([]);
+        assert!(merge_fio_hooks(&mut array, COMMAND).is_err());
+        let mut hooks = json!({"hooks": []});
+        assert!(merge_fio_hooks(&mut hooks, COMMAND).is_err());
+        let mut event = json!({"hooks": {"Stop": {}}});
+        assert!(merge_fio_hooks(&mut event, COMMAND).is_err());
+    }
+
+    #[test]
+    fn strip_removes_only_fio_handlers() {
+        let user = json!({"hooks":[{"type":"command","command":"echo hi"}]});
+        let mut config = merged(json!({"hooks": {"Stop": [user.clone()]}, "model": "x"}));
+        strip_fio_hooks(&mut config).unwrap();
+        assert_eq!(config, json!({"hooks": {"Stop": [user]}, "model": "x"}));
+    }
+
+    #[test]
+    fn strip_leaves_a_mixed_group_with_its_user_handler() {
+        let mixed = json!({"hooks": {"Stop": [{"hooks": [
+            {"type":"command","command":"echo hi"},
+            {"type":"command","command":"fio","statusMessage":STATUS_MESSAGE},
+        ]}]}});
+        let mut config = mixed;
+        strip_fio_hooks(&mut config).unwrap();
+        let handlers = config["hooks"]["Stop"][0]["hooks"].as_array().unwrap();
+        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers[0]["command"], "echo hi");
+    }
+
+    #[test]
+    fn strip_drops_empty_events_and_the_hooks_key() {
+        let mut config = merged(json!({}));
+        strip_fio_hooks(&mut config).unwrap();
+        assert_eq!(config, json!({}));
+    }
+
+    #[test]
+    fn strip_without_hooks_is_a_no_op() {
+        let mut config = json!({"model": "x"});
+        strip_fio_hooks(&mut config).unwrap();
+        assert_eq!(config, json!({"model": "x"}));
+    }
+
+    #[test]
+    fn hook_command_quotes_the_executable_and_pins_a_demand() {
+        let id: DemandId = "my-demand".parse().unwrap();
+        let command =
+            hook_command(Path::new("/opt/my tools/fio"), Agent::Codex, Some(&id)).unwrap();
+        assert_eq!(command, "'/opt/my tools/fio' hook codex --demand my-demand");
+        let plain = hook_command(Path::new("/usr/bin/fio"), Agent::Claude, None).unwrap();
+        assert_eq!(plain, "/usr/bin/fio hook claude");
+    }
+
+    #[test]
+    fn read_settings_treats_a_missing_file_as_empty_and_refuses_invalid_json() {
+        let temp = crate::store::testing::TempWorkspace::new();
+        let dir = temp.workspace.root();
+        assert_eq!(read_settings(&dir.join("missing.json")).unwrap(), json!({}));
+        let invalid = dir.join("invalid.json");
+        fs::write(&invalid, "{ nope").unwrap();
+        assert!(read_settings(&invalid).is_err());
+    }
+
+    #[test]
+    fn settings_paths_differ_per_agent() {
+        let temp = crate::store::testing::TempWorkspace::new();
+        let root = temp.workspace.root();
+        assert_eq!(
+            settings_path(&temp.workspace, Agent::Claude),
+            root.join(".claude/settings.local.json")
+        );
+        assert_eq!(
+            settings_path(&temp.workspace, Agent::Codex),
+            root.join(".codex/hooks.json")
+        );
+    }
+}

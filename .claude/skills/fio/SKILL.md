@@ -19,6 +19,8 @@ During work, record relevant events as they happen:
 - `fio debt <id> "Technical debt and resolution condition"`
 - `fio resolve <id> D<n>` once the debt is resolved.
 
+Group related work as sub-demands: when a request splits into several independent items (for example a list of support issues), create one parent demand and `fio new <id> "Title" --parent <parent-id>` for each item. Sub-demands live inside the parent's folder, one level only; keep each item's progress, decisions and attachments in its own sub-demand, and use `fio show <parent-id>` for the done/total overview. Do not create flat demands for items that belong to an existing parent.
+
 Link existing documents with `fio link <id> <paths...>`. Paths are relative to the current directory; files stay where they are. Read only documents needed for the task. Structured reads are available through `fio show <id> --json`, `fio context <id> --json` and `fio search "term" --json`.
 
 When completing or interrupting a manually opened session, run:

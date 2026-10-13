@@ -55,7 +55,7 @@ fio search "supplier" --json
 fio
 ```
 
-On Linux, the project registry is `~/.config/fio/config.toml`, respecting `XDG_CONFIG_HOME`. Demand records are `.fio/demands/<id>/demand.md`, and sessions are Markdown files in its `sessions/` directory. The active demand is stored in `.fio/state.toml`; ignore that file and `.fio/` lock files in Git.
+On Linux, the project registry is `~/.config/fio/config.toml`, respecting `XDG_CONFIG_HOME`. Demand records are `.fio/demands/<id>/demand.md`, and sub-demands (one level, created with `fio new <id> "Title" --parent <id>` or `N` in the TUI) live inside their parent: `.fio/demands/<parent>/<id>/demand.md`. Sessions are Markdown files in its `sessions/` directory. The active demand is stored in `.fio/state.toml`; ignore that file and `.fio/` lock files in Git.
 
 Search uses a disposable SQLite FTS5 index at `~/.cache/fio/index.db`, respecting `XDG_CACHE_HOME`. It is rebuilt when opening the TUI, running `fio search`, pressing F5, or receiving a file change notification. Removing the index does not remove any records. Search matches word prefixes across demand and session Markdown, including linked document paths; it does not read linked document contents or agent transcripts.
 
@@ -92,7 +92,7 @@ fio session end <local-session-id> --summary "Work completed and verified" --nex
 
 `--state "current state"` also replaces the demand's current-state summary. Read the demand again before replacing it when other agents are working on it. Writes are serialized to preserve concurrent item updates. `fio use` changes only the default for commands without an explicit demand; it does not change open sessions.
 
-Structured reads support `--json`: `projects`, `list`, `show`, `context`, `search` and `session list`. Shapes differ by purpose: `show --json` keeps the frontmatter as written (relative `docs`, `related` as ID strings) and lists sessions with their local `id`; `context --json` is for agents (absolute `docs`, relations as `{id,title,status,path,note}`); `session list --json` returns the local `id` plus the native `session_id` and `transcript`. Unreadable records are reported as warnings on stderr and skipped by `list`, `search` and session commands. To integrate another project, add the demand-context section from `AGENTS.md` to its Codex instructions, and copy `.claude/skills/fio/` into the same location in that project. The skill can also live in `~/.claude/skills/fio/` for personal use across projects.
+Structured reads support `--json`: `projects`, `list`, `show`, `context`, `search` and `session list`. Shapes differ by purpose: `show --json` keeps the frontmatter as written (relative `docs`, `related` as ID strings, `parent` for sub-demands) and lists `children` as `{id,title,status}` and sessions with their local `id`; `context --json` is for agents (absolute `docs`, `parent`, and `sub_demands` and other relations as `{id,title,status,path,note}`); `session list --json` returns the local `id` plus the native `session_id` and `transcript`. Unreadable records are reported as warnings on stderr and skipped by `list`, `search` and session commands. To integrate another project, add the demand-context section from `AGENTS.md` to its Codex instructions, and copy `.claude/skills/fio/` into the same location in that project. The skill can also live in `~/.claude/skills/fio/` for personal use across projects.
 
 See `fio --help` and `fio session --help`. Session records do not start or stop agent processes. Project-local lifecycle hooks can link native session IDs and transcript paths automatically. New templates and generated output use English; user-authored content stays in its original language.
 
@@ -121,7 +121,7 @@ Transcripts stay at their original paths; fio does not read or copy them. No API
 
 ## Data and Git
 
-Everything lives in plain files: demand and session records in `.fio/`, the project registry in `~/.config/fio/config.toml` and a rebuildable search index in `~/.cache/fio/index.db`. Back up `.fio/` like any other source directory; deleting the index loses nothing. `.fio/state.toml`, `.fio/state.lock` and `.fio/demands/*/write.lock` are local to a machine, as are the hook settings (`.claude/settings.local.json`, `.codex/hooks.json`). Whether to commit the rest of `.fio/` is your choice; session records contain transcript paths and agent responses, so consider that before publishing a repository.
+Everything lives in plain files: demand and session records in `.fio/`, the project registry in `~/.config/fio/config.toml` and a rebuildable search index in `~/.cache/fio/index.db`. Back up `.fio/` like any other source directory; deleting the index loses nothing. `.fio/state.toml`, `.fio/state.lock` and `.fio/demands/*/write.lock` and `.fio/demands/*/*/write.lock` are local to a machine, as are the hook settings (`.claude/settings.local.json`, `.codex/hooks.json`). Whether to commit the rest of `.fio/` is your choice; session records contain transcript paths and agent responses, so consider that before publishing a repository.
 
 ## Troubleshooting
 

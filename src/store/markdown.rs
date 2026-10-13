@@ -313,7 +313,8 @@ pub fn add_item(body: &mut String, kind: ItemKind, text: &str, date: NaiveDate) 
     for entry in &existing {
         if let Some(id) = &entry.item.id {
             ensure!(ids.insert(id), "Duplicate ID in '{title}': {id}");
-            if let Some(number) = id.strip_prefix(kind.prefix()) {
+            if kind.owns(id) {
+                let number = &id[kind.prefix().len()..];
                 max = max.max(number.parse::<u64>().context("Item ID is out of range")?);
             }
         }

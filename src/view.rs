@@ -108,3 +108,78 @@ impl<'a> OpenSession<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        model::Agent,
+        store::{
+            demands, sessions,
+            testing::{TempWorkspace, id},
+        },
+    };
+
+    fn started(temp: &TempWorkspace, demand: &str) -> sessions::SessionHandle {
+        sessions::start(
+            &temp.workspace,
+            sessions::StartOptions {
+                agent: Agent::Codex,
+                demand: Some(id(demand)),
+                objective: None,
+                session_id: Some("native-1".into()),
+                transcript: Some("/tmp/t.jsonl".into()),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn demand_view_lists_children_with_id_title_and_status_only() {
+        let temp = TempWorkspace::with_demands(&["p"]);
+        temp.create_child("c", "p");
+        let parent = demands::load(&temp.workspace, &id("p")).unwrap();
+        let children = demands::children(&temp.workspace, &parent).unwrap();
+        let view = DemandView::new(&parent, &[], &children).unwrap();
+        let value = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            value["children"],
+            serde_json::json!([{"id": "c", "title": "Title", "status": "backlog"}])
+        );
+    }
+
+    #[test]
+    fn session_view_hides_hook_bookkeeping_and_exposes_both_ids() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let handle = started(&temp, "a");
+        let notes = sessions::Notes {
+            summary: Some("Done".into()),
+            ..sessions::Notes::default()
+        };
+        sessions::update(&temp.workspace, &handle.id, &notes).unwrap();
+
+        let demand = demands::load(&temp.workspace, &id("a")).unwrap();
+        let records = sessions::read(&demand).unwrap();
+        assert!(records[0].metadata().fio_summary_revision.is_some());
+        let view = DemandView::new(&demand, &records, &[]).unwrap();
+        let value = serde_json::to_value(&view).unwrap();
+        let session = &value["sessions"][0];
+        assert_eq!(session["id"], handle.id.as_str());
+        assert_eq!(session["session_id"], "native-1");
+        assert!(session.get("fio_summary_revision").is_none());
+        assert!(session.get("fio_summary_seen").is_none());
+    }
+
+    #[test]
+    fn open_session_exposes_local_and_native_ids() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let handle = started(&temp, "a");
+        let open = sessions::open(&temp.workspace, None).unwrap();
+        let value = serde_json::to_value(OpenSession::new(&open.items[0])).unwrap();
+        assert_eq!(value["id"], handle.id.as_str());
+        assert_eq!(value["demand"], "a");
+        assert_eq!(value["agent"], "codex");
+        assert_eq!(value["session_id"], "native-1");
+        assert_eq!(value["transcript"], "/tmp/t.jsonl");
+    }
+}

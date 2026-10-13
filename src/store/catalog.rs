@@ -89,3 +89,53 @@ impl Entry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::testing::{TempWorkspace, id};
+
+    #[test]
+    fn children_of_returns_only_the_sub_demands_of_that_parent() {
+        let temp = TempWorkspace::with_demands(&["p", "other"]);
+        temp.create_child("c1", "p");
+        temp.create_child("o1", "other");
+        let catalog = temp.catalog();
+        let parent = catalog.find(&DemandKey {
+            workspace: temp.workspace.root().to_path_buf(),
+            id: id("p"),
+        });
+        let ids: Vec<_> = catalog
+            .children_of(parent.unwrap())
+            .map(|entry| entry.loaded.id().to_string())
+            .collect();
+        assert_eq!(ids, ["c1"]);
+    }
+
+    #[test]
+    fn find_matches_on_workspace_and_id() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let catalog = temp.catalog();
+        let key = |workspace: PathBuf, name: &str| DemandKey {
+            workspace,
+            id: id(name),
+        };
+        let root = temp.workspace.root().to_path_buf();
+        assert!(catalog.find(&key(root.clone(), "a")).is_some());
+        assert!(catalog.find(&key(root, "ghost")).is_none());
+        assert!(
+            catalog
+                .find(&key(PathBuf::from("/elsewhere"), "a"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn entry_key_identifies_the_demand() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let catalog = temp.catalog();
+        let key = catalog.demands[0].key();
+        assert_eq!(key.id, id("a"));
+        assert_eq!(key.workspace, temp.workspace.root());
+    }
+}

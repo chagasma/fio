@@ -301,3 +301,168 @@ fn document_section(out: &mut String, docs: &[PathBuf]) -> fmt::Result {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::{
+        model::today,
+        store::{
+            demands,
+            testing::{TempWorkspace, id},
+        },
+    };
+
+    fn package_markdown(temp: &TempWorkspace, name: &str) -> String {
+        let demand = demands::load(&temp.workspace, &id(name)).unwrap();
+        build(
+            &temp.workspace,
+            &demand,
+            DEFAULT_SESSIONS,
+            DEFAULT_DECISIONS,
+        )
+        .unwrap()
+        .markdown()
+    }
+
+    /// Replaces the first occurrence of `from` in the demand file.
+    fn rewrite(temp: &TempWorkspace, name: &str, from: &str, to: &str) {
+        let path = temp.workspace.demand_dir(&id(name)).join("demand.md");
+        let source = fs::read_to_string(&path).unwrap();
+        assert!(source.contains(from), "{from:?} not in demand");
+        fs::write(path, source.replacen(from, to, 1)).unwrap();
+    }
+
+    #[test]
+    fn empty_demand_renders_placeholders() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let text = package_markdown(&temp, "a");
+        assert!(text.starts_with("# a — Title\n\nProject: test\nStatus: backlog\n"));
+        assert!(text.contains("## Objective\n\nNot recorded."));
+        assert!(text.contains("## Open questions\n\nNone."));
+        assert!(!text.contains("Parent:"));
+        assert!(!text.contains("Sub-demands"));
+    }
+
+    #[test]
+    fn item_date_reads_the_date_written_by_add_item() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let mut locked = demands::load_for_update(&temp.workspace, &id("a")).unwrap();
+        locked.add_item(ItemKind::Decision, "choice").unwrap();
+        let body = &locked.document.body;
+        let items = markdown::items(body, ItemKind::Decision).unwrap();
+        assert_eq!(item_date(&items[0]), Some(today()));
+    }
+
+    #[test]
+    fn decisions_are_oldest_first_by_date_and_limited_to_the_most_recent() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        rewrite(
+            &temp,
+            "a",
+            "## Decisions\n",
+            "## Decisions\n\n- DEC2 (2026-03-01): newest\n- DEC1 (2026-01-01): oldest\n- DEC3 (2026-02-01): middle\n",
+        );
+        let demand = demands::load(&temp.workspace, &id("a")).unwrap();
+        let package = build(&temp.workspace, &demand, 3, 2).unwrap();
+        let ids: Vec<_> = package
+            .decisions
+            .iter()
+            .filter_map(|d| d.id.as_deref())
+            .collect();
+        assert_eq!(ids, ["DEC2", "DEC3"]);
+    }
+
+    #[test]
+    fn only_open_questions_and_debts_are_included() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let mut locked = demands::load_for_update(&temp.workspace, &id("a")).unwrap();
+        locked.add_item(ItemKind::Question, "open q").unwrap();
+        locked.add_item(ItemKind::Question, "closed q").unwrap();
+        locked
+            .complete_item(ItemKind::Question, "Q2", Some("yes"))
+            .unwrap();
+        locked.add_item(ItemKind::Debt, "open d").unwrap();
+        locked.add_item(ItemKind::Debt, "closed d").unwrap();
+        locked.complete_item(ItemKind::Debt, "D2", None).unwrap();
+        drop(locked);
+
+        let text = package_markdown(&temp, "a");
+        assert!(text.contains("open q") && text.contains("open d"));
+        assert!(!text.contains("closed q") && !text.contains("closed d"));
+    }
+
+    #[test]
+    fn sub_demands_report_progress_and_children_name_their_parent() {
+        let temp = TempWorkspace::with_demands(&["p"]);
+        temp.create_child("c1", "p");
+        temp.create_child("c2", "p");
+        demands::load_for_update(&temp.workspace, &id("c1"))
+            .unwrap()
+            .set_status(Status::Done)
+            .unwrap();
+
+        let parent = package_markdown(&temp, "p");
+        assert!(parent.contains("## Sub-demands (1/2 done)"));
+        assert!(parent.contains("- c1 — Title (done)"));
+        assert!(package_markdown(&temp, "c1").contains("Parent: p\n"));
+    }
+
+    #[test]
+    fn relations_to_missing_demands_are_reported_as_unavailable() {
+        let temp = TempWorkspace::with_demands(&["a", "other"]);
+        rewrite(&temp, "a", "related: []", "related:\n- other\n- ghost");
+        let text = package_markdown(&temp, "a");
+        assert!(text.contains("- other — Title (backlog);"));
+        assert!(text.contains("- ghost — unavailable:"));
+    }
+
+    #[test]
+    fn sessions_are_limited_and_marked_in_progress() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        for _ in 0..3 {
+            temp.start_session("a", None, Some("Objective text"));
+        }
+        let demand = demands::load(&temp.workspace, &id("a")).unwrap();
+        let package = build(&temp.workspace, &demand, 2, 10).unwrap();
+        assert_eq!(package.sessions.len(), 2);
+        assert!(package.markdown().contains("(in progress)"));
+        assert!(package.markdown().contains("Objective: Objective text"));
+    }
+
+    #[test]
+    fn json_exposes_the_documented_fields() {
+        let temp = TempWorkspace::with_demands(&["p"]);
+        temp.create_child("c", "p");
+        let demand = demands::load(&temp.workspace, &id("p")).unwrap();
+        let package = build(&temp.workspace, &demand, 3, 10).unwrap();
+        let value = serde_json::to_value(&package).unwrap();
+        for key in [
+            "id",
+            "parent",
+            "sub_demands",
+            "title",
+            "project",
+            "status",
+            "priority",
+            "created",
+            "updated",
+            "objective",
+            "current_state",
+            "links",
+            "questions",
+            "decisions",
+            "debts",
+            "sessions",
+            "docs",
+            "related",
+            "blocked_by",
+        ] {
+            assert!(value.get(key).is_some(), "missing {key}");
+        }
+        assert_eq!(value["sub_demands"][0]["id"], "c");
+        assert_eq!(value["sub_demands"][0]["status"], "backlog");
+    }
+}

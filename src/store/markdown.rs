@@ -414,3 +414,323 @@ pub fn single_line(text: &str) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::testing::assert_err;
+
+    type Doc = Document<serde_json::Value>;
+
+    fn date(day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 1, day).unwrap()
+    }
+
+    fn assert_all_crlf(text: &str) {
+        assert!(!text.replace("\r\n", "").contains('\n'), "{text:?}");
+    }
+
+    #[test]
+    fn document_round_trips_and_keeps_crlf() {
+        let source = "---\r\ntitle: A\r\n---\r\n\r\n## Objective\r\n";
+        let document = Doc::parse(source).unwrap();
+        assert_eq!(document.metadata["title"], "A");
+        assert_eq!(document.render(), source);
+    }
+
+    #[test]
+    fn document_rejects_missing_frontmatter() {
+        assert_err(Doc::parse("# no frontmatter\n"), "Missing YAML frontmatter");
+    }
+
+    #[test]
+    fn document_rejects_unclosed_frontmatter() {
+        assert_err(Doc::parse("---\ntitle: A\n"), "no closing delimiter");
+    }
+
+    #[test]
+    fn set_field_changes_only_that_field() {
+        let mut document =
+            Doc::parse("---\n# header\ntitle: A\nstatus: backlog\n---\nbody\n").unwrap();
+        document.set_field("status", "done").unwrap();
+        assert_eq!(document.metadata["status"], "done");
+        assert_eq!(document.metadata["title"], "A");
+        let rendered = document.render();
+        assert!(rendered.starts_with("---\n# header\ntitle: A\nstatus:"));
+        assert!(rendered.ends_with("---\nbody\n"));
+    }
+
+    #[test]
+    fn set_field_keeps_the_inline_comment() {
+        let mut document = Doc::parse("---\nstatus: backlog # why\n---\n").unwrap();
+        document.set_field("status", "done").unwrap();
+        assert!(document.render().contains("# why"));
+    }
+
+    #[test]
+    fn set_field_appends_a_missing_field() {
+        let mut document = Doc::parse("---\ntitle: A\n---\n").unwrap();
+        document.set_field("ended", "now").unwrap();
+        assert_eq!(document.metadata["ended"], "now");
+        assert!(document.render().starts_with("---\ntitle: A\nended:"));
+    }
+
+    #[test]
+    fn set_field_replaces_a_multiline_value_entirely() {
+        let mut document = Doc::parse("---\ntitle: {a: 1,\n  b: 2}\nstatus: x\n---\n").unwrap();
+        document.set_field("title", "short").unwrap();
+        assert_eq!(document.metadata["title"], "short");
+        assert_eq!(document.metadata["status"], "x");
+    }
+
+    #[test]
+    fn section_text_is_case_insensitive() {
+        let body = "\n## Objective\n\nShip it\n\n## Debts\n";
+        assert_eq!(section_text(body, "objective").unwrap(), "Ship it");
+    }
+
+    #[test]
+    fn section_text_is_empty_for_empty_or_missing_sections() {
+        let body = "\n## Objective\n\nShip it\n\n## Debts\n";
+        assert_eq!(section_text(body, "Debts").unwrap(), "");
+        assert_eq!(section_text(body, "Nope").unwrap(), "");
+    }
+
+    #[test]
+    fn section_text_ignores_headings_inside_code_blocks() {
+        let body = "## Objective\n\n```\n## Fake\n```\n";
+        assert_eq!(section_text(body, "Fake").unwrap(), "");
+        assert!(section_text(body, "Objective").unwrap().contains("## Fake"));
+    }
+
+    #[test]
+    fn a_level_one_heading_ends_a_section_but_level_three_stays_inside() {
+        let body = "## A\n\ntext\n\n### Sub\n\nmore\n\n# Top\n\nafter\n";
+        let text = section_text(body, "A").unwrap();
+        assert!(text.contains("### Sub") && text.contains("more"));
+        assert!(!text.contains("after"));
+    }
+
+    #[test]
+    fn duplicate_sections_are_an_error() {
+        assert_err(section_text("## A\n\n## A\n", "A"), "Duplicate 'A' section");
+    }
+
+    #[test]
+    fn set_section_replaces_only_that_section() {
+        let mut body = "\n## Objective\n\nOld\n\n## Debts\n\nkeep\n".to_owned();
+        set_section(&mut body, "Objective", "New").unwrap();
+        assert_eq!(section_text(&body, "Objective").unwrap(), "New");
+        assert_eq!(section_text(&body, "Debts").unwrap(), "keep");
+    }
+
+    #[test]
+    fn set_section_appends_a_missing_section() {
+        let mut body = "\n## Objective\n\nText\n".to_owned();
+        set_section(&mut body, "Current state", "Working").unwrap();
+        assert_eq!(section_text(&body, "Current state").unwrap(), "Working");
+        assert_eq!(section_text(&body, "Objective").unwrap(), "Text");
+    }
+
+    #[test]
+    fn set_section_rejects_empty_text() {
+        let mut body = "## Objective\n\nOld\n".to_owned();
+        assert_err(
+            set_section(&mut body, "Objective", "  \n "),
+            "cannot be empty",
+        );
+        assert_eq!(body, "## Objective\n\nOld\n");
+    }
+
+    #[test]
+    fn set_section_rejects_heading_injection() {
+        let mut body = "## Objective\n\nOld\n".to_owned();
+        assert_err(
+            set_section(&mut body, "Objective", "text\n## Other"),
+            "another level 1 or 2 heading",
+        );
+        assert_eq!(body, "## Objective\n\nOld\n");
+    }
+
+    #[test]
+    fn set_section_converts_text_to_the_body_newline_style() {
+        let mut body = "\r\n## Objective\r\n\r\nOld\r\n".to_owned();
+        set_section(&mut body, "Objective", "one\ntwo").unwrap();
+        assert_all_crlf(&body);
+        assert_eq!(section_text(&body, "Objective").unwrap(), "one\r\ntwo");
+    }
+
+    #[test]
+    fn add_item_writes_the_documented_line_format() {
+        let mut body = String::new();
+        add_item(&mut body, ItemKind::Question, "why?", date(1)).unwrap();
+        assert_eq!(body, "\n## Questions\n\n- [ ] Q1 (2026-01-01): why?\n");
+    }
+
+    #[test]
+    fn add_item_numbers_sequentially_per_kind() {
+        let mut body = String::new();
+        let mut add = |kind, text| add_item(&mut body, kind, text, date(1)).unwrap();
+        assert_eq!(add(ItemKind::Question, "a"), "Q1");
+        assert_eq!(add(ItemKind::Question, "b"), "Q2");
+        assert_eq!(add(ItemKind::Decision, "c"), "DEC1");
+        assert_eq!(add(ItemKind::Debt, "d"), "D1");
+    }
+
+    #[test]
+    fn decisions_have_no_checkbox() {
+        let mut body = String::new();
+        add_item(&mut body, ItemKind::Decision, "use Rust", date(1)).unwrap();
+        assert!(body.contains("\n- DEC1 (2026-01-01): use Rust"));
+        assert!(!body.contains("[ ]"));
+    }
+
+    #[test]
+    fn add_item_appends_inside_an_existing_empty_section() {
+        let mut body = "\n## Questions\n\n## Debts\n".to_owned();
+        add_item(&mut body, ItemKind::Question, "one", date(1)).unwrap();
+        add_item(&mut body, ItemKind::Question, "two", date(1)).unwrap();
+        assert_eq!(items(&body, ItemKind::Question).unwrap().len(), 2);
+        assert!(items(&body, ItemKind::Debt).unwrap().is_empty());
+    }
+
+    #[test]
+    fn add_item_rejects_multiline_and_blank_text() {
+        let mut body = String::new();
+        assert_err(
+            add_item(&mut body, ItemKind::Debt, "a\nb", date(1)),
+            "single line",
+        );
+        assert_err(
+            add_item(&mut body, ItemKind::Debt, "  ", date(1)),
+            "single line",
+        );
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn add_item_rejects_duplicate_ids() {
+        let mut body = "## Debts\n\n- [ ] D1: a\n- [ ] D1: b\n".to_owned();
+        assert_err(
+            add_item(&mut body, ItemKind::Debt, "c", date(1)),
+            "Duplicate ID in 'Debts': D1",
+        );
+    }
+
+    #[test]
+    fn add_item_ignores_ids_of_other_kinds_in_the_section() {
+        let mut body = "## Debts\n\n- [ ] D1: a\n- DEC3: misplaced\n".to_owned();
+        assert_eq!(
+            add_item(&mut body, ItemKind::Debt, "b", date(1)).unwrap(),
+            "D2"
+        );
+    }
+
+    #[test]
+    fn unnumbered_decisions_occupy_sequence_positions() {
+        let mut body = "## Decisions\n\n- plain one\n- plain two\n".to_owned();
+        assert_eq!(
+            add_item(&mut body, ItemKind::Decision, "x", date(1)).unwrap(),
+            "DEC3"
+        );
+    }
+
+    #[test]
+    fn items_ignore_nested_lists_and_quotes() {
+        let body = "## Debts\n\n- [ ] D1: top\n  - [ ] D2: nested\n\n> - [ ] D3: quoted\n";
+        let found = items(body, ItemKind::Debt).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.as_deref(), Some("D1"));
+    }
+
+    #[test]
+    fn items_accept_any_list_marker_and_checkbox_case() {
+        let body = "## Debts\n\n* [ ] D1: a\n+ [X] D2: b\n\n1. [x] D3: c\n";
+        let found = items(body, ItemKind::Debt).unwrap();
+        let summary: Vec<_> = found
+            .iter()
+            .map(|i| (i.id.as_deref().unwrap(), i.done))
+            .collect();
+        assert_eq!(summary, [("D1", false), ("D2", true), ("D3", true)]);
+    }
+
+    #[test]
+    fn items_read_ids_with_and_without_a_trailing_colon() {
+        let body = "## Debts\n\n- [ ] D1: legacy\n- [ ] D2 (2026-01-01): current\n";
+        let ids: Vec<_> = items(body, ItemKind::Debt)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.id.unwrap())
+            .collect();
+        assert_eq!(ids, ["D1", "D2"]);
+    }
+
+    #[test]
+    fn question_completion_requires_an_answer() {
+        let mut body = String::new();
+        add_item(&mut body, ItemKind::Question, "why?", date(1)).unwrap();
+        assert_err(
+            complete_item(&mut body, ItemKind::Question, "Q1", None, date(2)),
+            "requires an answer",
+        );
+    }
+
+    #[test]
+    fn completing_a_question_checks_the_box_and_records_the_answer() {
+        let mut body = String::new();
+        add_item(&mut body, ItemKind::Question, "why?", date(1)).unwrap();
+        complete_item(
+            &mut body,
+            ItemKind::Question,
+            "Q1",
+            Some("because"),
+            date(2),
+        )
+        .unwrap();
+        assert!(body.contains("- [x] Q1 (2026-01-01): why? → because (answered 2026-01-02)"));
+        assert!(open_items(&body, ItemKind::Question).unwrap().is_empty());
+    }
+
+    #[test]
+    fn completing_a_debt_records_the_resolution_date() {
+        let mut body = String::new();
+        add_item(&mut body, ItemKind::Debt, "cleanup", date(1)).unwrap();
+        complete_item(&mut body, ItemKind::Debt, "D1", None, date(2)).unwrap();
+        assert!(body.contains("- [x] D1 (2026-01-01): cleanup (resolved 2026-01-02)"));
+    }
+
+    #[test]
+    fn complete_item_rejects_completed_unknown_wrong_kind_and_decisions() {
+        let mut body = String::new();
+        add_item(&mut body, ItemKind::Debt, "cleanup", date(1)).unwrap();
+        add_item(&mut body, ItemKind::Decision, "choice", date(1)).unwrap();
+        let mut complete = |kind, id: &str| complete_item(&mut body, kind, id, None, date(2));
+        assert_err(complete(ItemKind::Debt, "D9"), "missing or duplicated");
+        assert_err(complete(ItemKind::Debt, "Q1"), "Use an ID in the form D<n>");
+        assert_err(
+            complete(ItemKind::Decision, "DEC1"),
+            "Decisions cannot be completed",
+        );
+        complete(ItemKind::Debt, "D1").unwrap();
+        assert_err(complete(ItemKind::Debt, "D1"), "already completed");
+    }
+
+    #[test]
+    fn complete_item_requires_a_checkbox() {
+        let mut body = "## Debts\n\n- D1: no box\n".to_owned();
+        assert_err(
+            complete_item(&mut body, ItemKind::Debt, "D1", None, date(2)),
+            "requires a [ ] checkbox",
+        );
+    }
+
+    #[test]
+    fn complete_item_preserves_crlf() {
+        let mut body =
+            "\r\n## Debts\r\n\r\n- [ ] D1 (2026-01-01): a\r\n- [ ] D2 (2026-01-01): b\r\n"
+                .to_owned();
+        complete_item(&mut body, ItemKind::Debt, "D1", None, date(2)).unwrap();
+        assert_all_crlf(&body);
+        assert_eq!(open_items(&body, ItemKind::Debt).unwrap().len(), 1);
+    }
+}

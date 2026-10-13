@@ -283,3 +283,277 @@ fn git_branch(workspace: &Path) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&result.stdout).trim().to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::testing::{TempWorkspace, assert_err, id};
+
+    fn try_start(
+        workspace: &Workspace,
+        demand: Option<&str>,
+        objective: Option<&str>,
+    ) -> Result<SessionHandle> {
+        start(
+            workspace,
+            StartOptions {
+                agent: Agent::Claude,
+                demand: demand.map(id),
+                objective: objective.map(str::to_owned),
+                session_id: None,
+                transcript: None,
+            },
+        )
+    }
+
+    fn start_for(workspace: &Workspace, demand: &str) -> SessionHandle {
+        try_start(workspace, Some(demand), None).unwrap()
+    }
+
+    fn summary(text: &str) -> Notes {
+        Notes {
+            summary: Some(text.to_owned()),
+            ..Notes::default()
+        }
+    }
+
+    #[test]
+    fn start_creates_an_open_record() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let handle = start_for(&temp.workspace, "a");
+        let open = open(&temp.workspace, None).unwrap().items;
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, handle.id);
+        assert!(open[0].is_open());
+    }
+
+    #[test]
+    fn start_records_the_objective() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        try_start(&temp.workspace, Some("a"), Some("Write tests")).unwrap();
+        let record = open(&temp.workspace, None).unwrap().items.remove(0);
+        assert_eq!(
+            record.text(section::SESSION_OBJECTIVE).unwrap(),
+            "Write tests"
+        );
+    }
+
+    #[test]
+    fn start_fails_for_an_unknown_demand() {
+        let temp = TempWorkspace::new();
+        assert_err(
+            try_start(&temp.workspace, Some("ghost"), None),
+            "Could not read demand 'ghost'",
+        );
+    }
+
+    #[test]
+    fn start_without_a_demand_needs_an_active_one() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        assert_err(try_start(&temp.workspace, None, None), "No active demand");
+        state::select(&temp.workspace, &id("a")).unwrap();
+        let handle = try_start(&temp.workspace, None, None).unwrap();
+        assert_eq!(handle.demand, id("a"));
+    }
+
+    #[test]
+    fn sub_demand_sessions_live_in_the_sub_demand_folder() {
+        let temp = TempWorkspace::with_demands(&["p"]);
+        temp.create_child("c", "p");
+        let handle = start_for(&temp.workspace, "c");
+        assert!(
+            handle
+                .path
+                .starts_with(temp.workspace.demands_dir().join("p/c/sessions"))
+        );
+        let scanned = scan(&temp.workspace).unwrap();
+        assert_eq!(scanned.items.len(), 1);
+        assert_eq!(scanned.warnings, Vec::<String>::new());
+    }
+
+    #[test]
+    fn parent_sessions_do_not_leak_into_scan_warnings() {
+        let temp = TempWorkspace::with_demands(&["p"]);
+        temp.create_child("c", "p");
+        start_for(&temp.workspace, "p");
+        assert_eq!(
+            scan(&temp.workspace).unwrap().warnings,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn open_can_filter_by_demand() {
+        let temp = TempWorkspace::with_demands(&["a", "b"]);
+        start_for(&temp.workspace, "a");
+        start_for(&temp.workspace, "b");
+        assert_eq!(open(&temp.workspace, None).unwrap().items.len(), 2);
+        let only_b = open(&temp.workspace, Some(&id("b"))).unwrap().items;
+        assert_eq!(only_b.len(), 1);
+        assert_eq!(only_b[0].metadata().demand, id("b"));
+    }
+
+    #[test]
+    fn update_writes_summary_and_next_steps() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let handle = start_for(&temp.workspace, "a");
+        let notes = Notes {
+            summary: Some("Did things".into()),
+            next: Some("More things".into()),
+            state: None,
+        };
+        update(&temp.workspace, &handle.id, &notes).unwrap();
+        let record = open(&temp.workspace, None).unwrap().items.remove(0);
+        assert_eq!(record.text(section::WORK_COMPLETED).unwrap(), "Did things");
+        assert_eq!(record.text(section::NEXT_STEPS).unwrap(), "More things");
+    }
+
+    #[test]
+    fn update_sets_the_summary_revision_only_with_a_summary() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let handle = start_for(&temp.workspace, "a");
+        let next_only = Notes {
+            next: Some("later".into()),
+            ..Notes::default()
+        };
+        update(&temp.workspace, &handle.id, &next_only).unwrap();
+        let record = open(&temp.workspace, None).unwrap().items.remove(0);
+        assert!(record.metadata().fio_summary_revision.is_none());
+        update(&temp.workspace, &handle.id, &summary("done")).unwrap();
+        let record = open(&temp.workspace, None).unwrap().items.remove(0);
+        assert!(record.metadata().fio_summary_revision.is_some());
+    }
+
+    #[test]
+    fn update_and_end_write_the_demand_current_state() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let handle = start_for(&temp.workspace, "a");
+        let state = |text: &str| Notes {
+            state: Some(text.to_owned()),
+            ..Notes::default()
+        };
+        update(&temp.workspace, &handle.id, &state("In progress")).unwrap();
+        let current = || {
+            let demand = demands::load(&temp.workspace, &id("a")).unwrap();
+            markdown::section_text(&demand.document.body, section::CURRENT_STATE).unwrap()
+        };
+        assert_eq!(current(), "In progress");
+        let finish = Notes {
+            summary: Some("Done".into()),
+            state: Some("Finished".into()),
+            ..Notes::default()
+        };
+        end(&temp.workspace, Some(&handle.id), &finish).unwrap();
+        assert_eq!(current(), "Finished");
+    }
+
+    #[test]
+    fn update_requires_an_open_session() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        assert_err(
+            update(&temp.workspace, "missing", &summary("x")),
+            "No matching open session",
+        );
+    }
+
+    #[test]
+    fn end_requires_a_summary() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let handle = start_for(&temp.workspace, "a");
+        assert_err(
+            end(&temp.workspace, Some(&handle.id), &Notes::default()),
+            "Provide --summary",
+        );
+        assert_eq!(open(&temp.workspace, None).unwrap().items.len(), 1);
+    }
+
+    #[test]
+    fn end_accepts_a_summary_recorded_earlier() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let handle = start_for(&temp.workspace, "a");
+        update(&temp.workspace, &handle.id, &summary("Done")).unwrap();
+        end(&temp.workspace, Some(&handle.id), &Notes::default()).unwrap();
+    }
+
+    #[test]
+    fn end_closes_the_session() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let handle = start_for(&temp.workspace, "a");
+        end(&temp.workspace, Some(&handle.id), &summary("Done")).unwrap();
+        assert!(open(&temp.workspace, None).unwrap().items.is_empty());
+        let all = scan(&temp.workspace).unwrap().items;
+        assert!(all[0].metadata().ended.is_some());
+    }
+
+    #[test]
+    fn closed_sessions_cannot_be_updated_or_ended_again() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let handle = start_for(&temp.workspace, "a");
+        end(&temp.workspace, Some(&handle.id), &summary("Done")).unwrap();
+        assert_err(
+            update(&temp.workspace, &handle.id, &summary("x")),
+            "No matching open session",
+        );
+        assert_err(
+            end(&temp.workspace, Some(&handle.id), &summary("x")),
+            "No matching open session",
+        );
+    }
+
+    #[test]
+    fn end_without_an_id_is_ambiguous_with_several_open_sessions() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        start_for(&temp.workspace, "a");
+        start_for(&temp.workspace, "a");
+        assert_err(
+            end(&temp.workspace, None, &summary("Done")),
+            "Multiple sessions are open",
+        );
+    }
+
+    #[test]
+    fn end_without_an_id_closes_the_only_open_session() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        start_for(&temp.workspace, "a");
+        end(&temp.workspace, None, &summary("Done")).unwrap();
+        assert!(open(&temp.workspace, None).unwrap().items.is_empty());
+    }
+
+    #[test]
+    fn unused_record_skips_names_that_are_taken() {
+        let temp = TempWorkspace::new();
+        let folder = temp.workspace.demands_dir();
+        assert_eq!(unused_record(&folder, "s").0, "s");
+        fs::write(folder.join("s.md"), "").unwrap();
+        assert_eq!(unused_record(&folder, "s").0, "s-2");
+        fs::write(folder.join("s-2.md"), "").unwrap();
+        let (id, path) = unused_record(&folder, "s");
+        assert_eq!(id, "s-3");
+        assert_eq!(path, folder.join("s-3.md"));
+    }
+
+    fn copy_session_to_another_demand(temp: &TempWorkspace, handle: &SessionHandle, to: &str) {
+        let target = temp.workspace.demand_dir(&id(to)).join("sessions");
+        fs::create_dir_all(&target).unwrap();
+        fs::copy(&handle.path, target.join("copied.md")).unwrap();
+    }
+
+    #[test]
+    fn scan_skips_a_record_that_belongs_to_another_demand_with_a_warning() {
+        let temp = TempWorkspace::with_demands(&["a", "b"]);
+        let handle = start_for(&temp.workspace, "a");
+        copy_session_to_another_demand(&temp, &handle, "b");
+        let scanned = scan(&temp.workspace).unwrap();
+        assert_eq!(scanned.items.len(), 1);
+        assert_eq!(scanned.warnings.len(), 1);
+    }
+
+    #[test]
+    fn read_is_strict_about_a_record_that_belongs_to_another_demand() {
+        let temp = TempWorkspace::with_demands(&["a", "b"]);
+        let handle = start_for(&temp.workspace, "a");
+        copy_session_to_another_demand(&temp, &handle, "b");
+        let demand = demands::load(&temp.workspace, &id("b")).unwrap();
+        assert_err(read(&demand), "belongs to another demand");
+    }
+}

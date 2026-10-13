@@ -269,3 +269,283 @@ impl LockedDemand {
         self.save()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::testing::{TempWorkspace, assert_err, id};
+
+    fn ids(demands: &[LoadedDemand]) -> Vec<&str> {
+        demands.iter().map(|demand| demand.id().as_str()).collect()
+    }
+
+    fn rewrite(path: &Path, from: &str, to: &str) {
+        let source = fs::read_to_string(path).unwrap();
+        assert!(source.contains(from), "{from:?} not in {source:?}");
+        fs::write(path, source.replacen(from, to, 1)).unwrap();
+    }
+
+    #[test]
+    fn create_writes_a_loadable_demand() {
+        let temp = TempWorkspace::new();
+        create(
+            &temp.workspace,
+            &id("a"),
+            "  My title ",
+            Priority::High,
+            None,
+        )
+        .unwrap();
+        let loaded = load(&temp.workspace, &id("a")).unwrap();
+        let metadata = &loaded.document.metadata;
+        assert_eq!(metadata.title, "My title");
+        assert_eq!(metadata.project, "test");
+        assert_eq!(metadata.status, Status::Backlog);
+        assert_eq!(metadata.priority, Priority::High);
+        assert!(metadata.parent.is_none());
+    }
+
+    #[test]
+    fn create_writes_the_standard_sections() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let loaded = load(&temp.workspace, &id("a")).unwrap();
+        for title in [
+            "Objective",
+            "Current state",
+            "Decisions",
+            "Questions",
+            "Debts",
+        ] {
+            assert!(
+                loaded.document.body.contains(&format!("## {title}")),
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_rejects_an_existing_id() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        assert_err(temp.try_create("a", None), "already exists");
+    }
+
+    #[test]
+    fn create_rejects_the_reserved_sessions_id() {
+        let temp = TempWorkspace::new();
+        assert_err(temp.try_create("sessions", None), "reserved");
+    }
+
+    #[test]
+    fn create_rejects_multiline_titles() {
+        let temp = TempWorkspace::new();
+        let result = create(&temp.workspace, &id("a"), "x\ny", Priority::default(), None);
+        assert_err(result, "single line");
+    }
+
+    #[test]
+    fn sub_demands_record_their_parent() {
+        let temp = TempWorkspace::with_demands(&["parent"]);
+        temp.create_child("child", "parent");
+        let child = load(&temp.workspace, &id("child")).unwrap();
+        assert_eq!(child.document.metadata.parent, Some(id("parent")));
+    }
+
+    #[test]
+    fn sub_demands_are_limited_to_one_level() {
+        let temp = TempWorkspace::with_demands(&["parent"]);
+        temp.create_child("child", "parent");
+        assert_err(
+            temp.try_create("gc", Some("child")),
+            "only one level is supported",
+        );
+    }
+
+    #[test]
+    fn sub_demands_require_an_existing_parent() {
+        let temp = TempWorkspace::new();
+        assert_err(
+            temp.try_create("c", Some("ghost")),
+            "Could not read demand 'ghost'",
+        );
+    }
+
+    #[test]
+    fn sub_demand_ids_cannot_reuse_a_top_level_id() {
+        let temp = TempWorkspace::with_demands(&["a", "p"]);
+        assert_err(temp.try_create("a", Some("p")), "already exists");
+    }
+
+    #[test]
+    fn sub_demand_ids_cannot_repeat_across_parents() {
+        let temp = TempWorkspace::with_demands(&["p1", "p2"]);
+        temp.create_child("c", "p1");
+        assert_err(temp.try_create("c", Some("p2")), "already exists");
+    }
+
+    #[test]
+    fn scan_lists_each_parent_followed_by_its_children() {
+        let temp = TempWorkspace::with_demands(&["m", "z"]);
+        temp.create_child("a-child", "m");
+        let scanned = scan(&temp.workspace).unwrap();
+        assert_eq!(ids(&scanned.items), ["m", "a-child", "z"]);
+        assert_eq!(scanned.warnings, Vec::<String>::new());
+    }
+
+    #[test]
+    fn scan_turns_unreadable_demands_into_warnings() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let broken = temp.workspace.demands_dir().join("broken");
+        fs::create_dir(&broken).unwrap();
+        fs::write(broken.join("demand.md"), "no frontmatter").unwrap();
+
+        let scanned = scan(&temp.workspace).unwrap();
+        assert_eq!(ids(&scanned.items), ["a"]);
+        assert_eq!(scanned.warnings.len(), 1);
+        assert!(scanned.warnings[0].contains("broken"));
+    }
+
+    #[test]
+    fn scan_does_not_see_demands_nested_below_a_sub_demand() {
+        let temp = TempWorkspace::with_demands(&["p"]);
+        temp.create_child("c", "p");
+        let child = temp.workspace.demand_dir(&id("c"));
+        fs::create_dir(child.join("gc")).unwrap();
+        fs::copy(child.join("demand.md"), child.join("gc/demand.md")).unwrap();
+
+        let scanned = scan(&temp.workspace).unwrap();
+        assert_eq!(ids(&scanned.items), ["p", "c"]);
+        assert_eq!(scanned.warnings, Vec::<String>::new());
+    }
+
+    #[test]
+    fn load_rejects_a_frontmatter_id_that_differs_from_the_folder() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let demands_dir = temp.workspace.demands_dir();
+        fs::rename(demands_dir.join("a"), demands_dir.join("renamed")).unwrap();
+        assert_err(
+            load(&temp.workspace, &id("renamed")),
+            "Frontmatter ID does not match",
+        );
+    }
+
+    #[test]
+    fn load_rejects_a_frontmatter_project_that_differs_from_the_workspace() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let path = temp.workspace.demand_dir(&id("a")).join("demand.md");
+        rewrite(&path, "project: test", "project: other");
+        assert_err(load(&temp.workspace, &id("a")), "project does not match");
+    }
+
+    #[test]
+    fn load_rejects_a_parent_that_differs_from_the_folder() {
+        let temp = TempWorkspace::with_demands(&["p"]);
+        temp.create_child("c", "p");
+        let demands_dir = temp.workspace.demands_dir();
+        fs::rename(demands_dir.join("p/c"), demands_dir.join("c")).unwrap();
+        assert_err(load(&temp.workspace, &id("c")), "parent does not match");
+    }
+
+    #[test]
+    fn list_returns_every_demand_without_a_filter() {
+        let temp = TempWorkspace::with_demands(&["a", "b"]);
+        assert_eq!(list(&temp.workspace, None).unwrap().items.len(), 2);
+    }
+
+    #[test]
+    fn list_filters_by_status() {
+        let temp = TempWorkspace::with_demands(&["a", "b"]);
+        load_for_update(&temp.workspace, &id("b"))
+            .unwrap()
+            .set_status(Status::Done)
+            .unwrap();
+        let done = list(&temp.workspace, Some(Status::Done)).unwrap().items;
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].demand.id.as_str(), "b");
+    }
+
+    #[test]
+    fn children_are_sorted_and_scoped_to_the_parent() {
+        let temp = TempWorkspace::with_demands(&["p", "other"]);
+        temp.create_child("c2", "p");
+        temp.create_child("c1", "p");
+        temp.create_child("o1", "other");
+        let parent = load(&temp.workspace, &id("p")).unwrap();
+        let children = children(&temp.workspace, &parent).unwrap();
+        assert_eq!(ids(&children), ["c1", "c2"]);
+    }
+
+    fn edited(temp: &TempWorkspace, edit: impl FnOnce(&mut LockedDemand)) -> LoadedDemand {
+        edit(&mut load_for_update(&temp.workspace, &id("a")).unwrap());
+        load(&temp.workspace, &id("a")).unwrap()
+    }
+
+    #[test]
+    fn set_priority_persists() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let loaded = edited(&temp, |d| d.set_priority(Priority::Low).unwrap());
+        assert_eq!(loaded.document.metadata.priority, Priority::Low);
+    }
+
+    #[test]
+    fn set_current_state_persists() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let loaded = edited(&temp, |d| d.set_current_state("Halfway").unwrap());
+        let text = markdown::section_text(&loaded.document.body, section::CURRENT_STATE).unwrap();
+        assert_eq!(text, "Halfway");
+    }
+
+    #[test]
+    fn add_and_complete_item_persist() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let loaded = edited(&temp, |d| {
+            assert_eq!(d.add_item(ItemKind::Question, "why?").unwrap(), "Q1");
+            d.complete_item(ItemKind::Question, "Q1", Some("because"))
+                .unwrap();
+        });
+        let all = markdown::items(&loaded.document.body, ItemKind::Question).unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(all[0].done);
+    }
+
+    #[test]
+    fn link_stores_workspace_relative_paths_once() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let doc = temp.workspace.root().join("notes.md");
+        fs::write(&doc, "x").unwrap();
+        let loaded = edited(&temp, |d| {
+            d.link(&temp.workspace, vec![doc.clone(), doc.clone()])
+                .unwrap();
+        });
+        assert_eq!(loaded.document.metadata.docs, ["notes.md"]);
+    }
+
+    #[test]
+    fn link_rejects_missing_documents_and_paths_outside_the_workspace() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let mut locked = load_for_update(&temp.workspace, &id("a")).unwrap();
+        let missing = temp.workspace.root().join("missing.md");
+        assert_err(
+            locked.link(&temp.workspace, vec![missing]),
+            "does not exist",
+        );
+        let outside = std::env::current_exe().unwrap();
+        assert_err(
+            locked.link(&temp.workspace, vec![outside]),
+            "inside the workspace",
+        );
+    }
+
+    #[test]
+    fn saving_bumps_the_updated_date() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let path = temp.workspace.demand_dir(&id("a")).join("demand.md");
+        rewrite(
+            &path,
+            &format!("updated: \"{}\"", today()),
+            "updated: \"2000-01-01\"",
+        );
+        let loaded = edited(&temp, |d| d.set_status(Status::Active).unwrap());
+        let stale = chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
+        assert_ne!(loaded.document.metadata.updated, stale);
+    }
+}

@@ -127,3 +127,63 @@ fn read_project(path: &Path) -> Result<Project> {
         fs::read_to_string(path).with_context(|| format!("Could not read {}", path.display()))?;
     toml::from_str(&source).with_context(|| format!("Invalid configuration: {}", path.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::testing::{TempWorkspace, id};
+
+    #[test]
+    fn containing_finds_the_workspace_from_a_subdirectory() {
+        let temp = TempWorkspace::new();
+        let nested = temp.workspace.root().join("a/b");
+        fs::create_dir_all(&nested).unwrap();
+        let found = Workspace::containing(&nested).unwrap().unwrap();
+        assert_eq!(found.root(), temp.workspace.root());
+        assert_eq!(found.name(), "test");
+    }
+
+    #[test]
+    fn containing_is_none_outside_a_workspace() {
+        assert!(Workspace::containing(Path::new("/")).unwrap().is_none());
+    }
+
+    #[test]
+    fn open_reports_an_invalid_project_file() {
+        let temp = TempWorkspace::new();
+        fs::write(temp.workspace.root().join(PROJECT_FILE), "not = [valid").unwrap();
+        let result = Workspace::open(temp.workspace.root().to_path_buf());
+        assert!(result.is_err_and(|error| error.to_string().contains("Invalid configuration")));
+    }
+
+    #[test]
+    fn demand_dir_of_a_top_level_demand_is_directly_under_demands() {
+        let temp = TempWorkspace::with_demands(&["parent"]);
+        let workspace = &temp.workspace;
+        assert_eq!(
+            workspace.demand_dir(&id("parent")),
+            workspace.demands_dir().join("parent")
+        );
+    }
+
+    #[test]
+    fn demand_dir_of_a_sub_demand_is_inside_its_parent() {
+        let temp = TempWorkspace::with_demands(&["parent"]);
+        temp.create_child("child", "parent");
+        let workspace = &temp.workspace;
+        assert_eq!(
+            workspace.demand_dir(&id("child")),
+            workspace.demands_dir().join("parent/child")
+        );
+    }
+
+    #[test]
+    fn demand_dir_of_an_unknown_id_falls_back_to_the_top_level_path() {
+        let temp = TempWorkspace::new();
+        let workspace = &temp.workspace;
+        assert_eq!(
+            workspace.demand_dir(&id("ghost")),
+            workspace.demands_dir().join("ghost")
+        );
+    }
+}

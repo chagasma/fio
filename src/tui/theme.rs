@@ -99,3 +99,42 @@ pub fn styled(text: &str) -> Text<'static> {
     });
     Text::from(lines.collect::<Vec<_>>())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messages_that_look_like_failures_are_red() {
+        for text in ["Error: boom", "Refresh failed: x", "Could not read"] {
+            assert_eq!(message(text).fg, Some(Color::Red), "{text}");
+        }
+        assert_eq!(message("Demand 'a' created").fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn styled_emphasizes_headings_and_the_first_line() {
+        let text = styled("title\nObjective\nplain");
+        assert_eq!(
+            text.lines[0].style,
+            Style::new().add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(text.lines[1].style, heading());
+        assert_eq!(text.lines[2].style, Style::new());
+    }
+
+    #[test]
+    fn closed_items_are_dimmed_and_decisions_are_cyan() {
+        let text = styled("x\n- [x] done\n- DEC1: choice");
+        assert_eq!(text.lines[1].style.fg, Some(Color::Green));
+        assert_eq!(text.lines[2].style.fg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn every_status_and_priority_has_a_style() {
+        for status_value in Status::ALL {
+            assert!(status(status_value).fg.is_some());
+        }
+        assert_eq!(priority(Priority::High).fg, Some(Color::Red));
+    }
+}

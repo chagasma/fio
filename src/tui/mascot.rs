@@ -56,3 +56,23 @@ pub fn render(frame: &mut Frame, area: Rect, index: usize) {
     let target = Rect::new(x, area.y, COLUMNS.min(area.width), ROWS.min(area.height));
     frame.render_widget(Paragraph::new(lines(index)), target);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fits_requires_room_for_the_sprite_and_extra_rows() {
+        assert!(fits(Rect::new(0, 0, COLUMNS + 2, ROWS + 4), 4));
+        assert!(!fits(Rect::new(0, 0, COLUMNS + 1, ROWS + 4), 4));
+        assert!(!fits(Rect::new(0, 0, COLUMNS + 2, ROWS + 3), 4));
+    }
+
+    #[test]
+    fn every_frame_renders_one_line_per_two_pixel_rows() {
+        for index in 0..FRAME_COUNT {
+            assert_eq!(lines(index).len(), usize::from(ROWS));
+        }
+        assert_eq!(lines(FRAME_COUNT).len(), lines(0).len());
+    }
+}

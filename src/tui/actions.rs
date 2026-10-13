@@ -299,3 +299,99 @@ impl App {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::store::testing::{TempWorkspace, assert_err};
+
+    fn editor(visual: Option<&str>, editor: Option<&str>, path: &Path) -> Result<External> {
+        External::with_editor(visual, editor, path, Path::new("/w"))
+    }
+
+    fn existing_file() -> (TempWorkspace, PathBuf) {
+        let temp = TempWorkspace::new();
+        let path = temp.workspace.root().join("notes.md");
+        fs::write(&path, "x").unwrap();
+        (temp, path)
+    }
+
+    #[test]
+    fn visual_wins_over_editor() {
+        let (_temp, path) = existing_file();
+        let external = editor(Some("vim"), Some("nano"), &path).unwrap();
+        assert_eq!(external.program, "vim");
+        assert_eq!(external.args, [path.to_str().unwrap()]);
+    }
+
+    #[test]
+    fn a_blank_visual_falls_back_to_editor() {
+        let (_temp, path) = existing_file();
+        let external = editor(Some("  "), Some("nano"), &path).unwrap();
+        assert_eq!(external.program, "nano");
+    }
+
+    #[test]
+    fn editor_arguments_are_split_like_a_shell_would() {
+        let (_temp, path) = existing_file();
+        let external = editor(Some("code --wait --folder 'a b'"), None, &path).unwrap();
+        assert_eq!(external.program, "code");
+        assert_eq!(
+            external.args,
+            ["--wait", "--folder", "a b", path.to_str().unwrap()]
+        );
+    }
+
+    #[test]
+    fn missing_or_broken_editor_settings_are_explained() {
+        let (_temp, path) = existing_file();
+        assert_err(editor(None, None, &path), "Set VISUAL or EDITOR");
+        assert_err(
+            editor(Some("'unterminated"), None, &path),
+            "Invalid VISUAL / EDITOR",
+        );
+        assert_err(editor(None, Some(""), &path), "editor command is empty");
+    }
+
+    #[test]
+    fn the_editor_target_must_exist() {
+        let result = External::editor(Path::new("/definitely/not/here.md"), Path::new("/w"));
+        assert_err(result, "does not exist");
+    }
+
+    fn external(program: &str, args: &[&str], workspace: &Path) -> External {
+        External {
+            program: program.into(),
+            args: args.iter().map(ToString::to_string).collect(),
+            workspace: workspace.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn run_succeeds_in_the_workspace_directory() {
+        let temp = TempWorkspace::new();
+        let root = temp.workspace.root();
+        external("sh", &["-c", "pwd > marker"], root).run().unwrap();
+        let printed = fs::read_to_string(root.join("marker")).unwrap();
+        assert_eq!(
+            Path::new(printed.trim()).canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn run_reports_a_failing_exit_status() {
+        let temp = TempWorkspace::new();
+        let result = external("sh", &["-c", "exit 3"], temp.workspace.root()).run();
+        assert_err(result, "exited with");
+    }
+
+    #[test]
+    fn run_reports_a_program_that_cannot_start() {
+        let temp = TempWorkspace::new();
+        let result = external("fio-no-such-program", &[], temp.workspace.root()).run();
+        assert_err(result, "Could not start fio-no-such-program");
+    }
+}

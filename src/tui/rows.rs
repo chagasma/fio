@@ -281,3 +281,27 @@ fn highlight(snippet: &str) -> Vec<Span<'static>> {
     spans.push(Span::styled(rest.to_owned(), theme::muted()));
     spans
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(spans: &[Span<'_>]) -> Vec<String> {
+        spans.iter().map(|span| span.content.to_string()).collect()
+    }
+
+    #[test]
+    fn highlight_splits_snippets_at_match_markers() {
+        let spans = highlight("before [hit] middle [other] end");
+        assert_eq!(
+            texts(&spans),
+            ["before ", "hit", " middle ", "other", " end"]
+        );
+    }
+
+    #[test]
+    fn highlight_keeps_unbalanced_brackets_as_text() {
+        assert_eq!(texts(&highlight("a [b")), ["a [b"]);
+        assert_eq!(texts(&highlight("plain")), ["plain"]);
+    }
+}

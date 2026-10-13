@@ -135,3 +135,66 @@ impl Prompt {
         !matches!(self, Self::Search | Self::Command)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tabs_wrap_in_both_directions() {
+        assert!(Tab::Docs.next() == Tab::Summary);
+        assert!(Tab::Summary.previous() == Tab::Docs);
+        assert!(Tab::Summary.next() == Tab::Sessions);
+    }
+
+    #[test]
+    fn digits_one_to_six_select_tabs() {
+        assert!(Tab::from_digit('1') == Some(Tab::Summary));
+        assert!(Tab::from_digit('6') == Some(Tab::Docs));
+        assert!(Tab::from_digit('0').is_none());
+        assert!(Tab::from_digit('7').is_none());
+        assert!(Tab::from_digit('x').is_none());
+    }
+
+    #[test]
+    fn item_tabs_map_to_item_kinds_and_back() {
+        for kind in ItemKind::ALL {
+            assert!(Tab::for_kind(kind).item_kind() == Some(kind));
+        }
+        assert!(Tab::Summary.item_kind().is_none());
+    }
+
+    #[test]
+    fn prompt_labels_mention_the_parent_and_the_statuses() {
+        let new = NewDemand {
+            workspace: PathBuf::from("/w"),
+            parent: None,
+        };
+        assert_eq!(Prompt::NewId(new.clone()).label(), "New demand ID: ");
+        let child = NewDemand {
+            parent: Some("p".parse().unwrap()),
+            ..new
+        };
+        assert!(Prompt::NewId(child).label().contains("(in p)"));
+        let status = Prompt::Status(DemandKey {
+            workspace: PathBuf::from("/w"),
+            id: "a".parse().unwrap(),
+        });
+        assert!(
+            status
+                .label()
+                .contains("backlog/active/paused/blocked/done/archived")
+        );
+    }
+
+    #[test]
+    fn only_search_and_command_prompts_discard_their_text() {
+        assert!(!Prompt::Search.is_draft());
+        assert!(!Prompt::Command.is_draft());
+        let new = NewDemand {
+            workspace: PathBuf::from("/w"),
+            parent: None,
+        };
+        assert!(Prompt::NewId(new).is_draft());
+    }
+}

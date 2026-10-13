@@ -4,7 +4,7 @@ use crate::store::catalog::Catalog;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
     collections::BTreeSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     time::{Duration, Instant},
 };
@@ -28,16 +28,22 @@ impl FileWatch {
         })
     }
     pub fn sync(&mut self, catalog: &Catalog) -> Vec<String> {
+        let config_dir =
+            directories::ProjectDirs::from("", "", "fio").map(|dirs| dirs.config_dir().to_owned());
+        self.sync_with(catalog, config_dir.as_deref())
+    }
+
+    /// Watches every project and, so first-time registration is detected too,
+    /// the nearest existing ancestor of `config_dir`.
+    pub fn sync_with(&mut self, catalog: &Catalog, config_dir: Option<&Path>) -> Vec<String> {
         let mut paths: BTreeSet<_> = catalog
             .projects
             .iter()
             .flat_map(|project| [project.workspace.clone(), project.workspace.join(".fio")])
             .collect();
-        if let Some(dirs) = directories::ProjectDirs::from("", "", "fio") {
-            // Watch an existing ancestor so first-time registration is also detected.
-            if let Some(parent) = dirs.config_dir().ancestors().find(|path| path.is_dir()) {
-                paths.insert(parent.to_owned());
-            }
+        if let Some(parent) = config_dir.and_then(|dir| dir.ancestors().find(|path| path.is_dir()))
+        {
+            paths.insert(parent.to_owned());
         }
         let mut errors = Vec::new();
         for path in self.paths.difference(&paths) {
@@ -67,11 +73,7 @@ impl FileWatch {
     pub fn ready(&mut self) -> Result<bool> {
         while let Ok(event) = self.events.try_recv() {
             let event = event?;
-            if matches!(
-                event.kind,
-                notify::EventKind::Remove(_)
-                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
-            ) {
+            if is_removal(event.kind) {
                 let removed: Vec<_> = self
                     .paths
                     .iter()
@@ -86,20 +88,7 @@ impl FileWatch {
                     self.paths.remove(&path);
                 }
             }
-            if matches!(event.kind, notify::EventKind::Access(_)) {
-                continue;
-            }
-            if event.paths.iter().any(|path| {
-                path.file_name().is_some_and(|name| {
-                    name == "config.toml" || name == "project.toml" || name == "state.toml"
-                }) || path.extension().is_some_and(|extension| extension == "md")
-                    || path.is_dir()
-                    || matches!(
-                        event.kind,
-                        notify::EventKind::Remove(_)
-                            | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
-                    )
-            }) {
+            if is_relevant(&event) {
                 self.changed = Some(Instant::now());
             }
         }
@@ -112,4 +101,25 @@ impl FileWatch {
         }
         Ok(false)
     }
+}
+
+fn is_removal(kind: notify::EventKind) -> bool {
+    matches!(
+        kind,
+        notify::EventKind::Remove(_)
+            | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+    )
+}
+
+/// Whether an event can change what fio shows: Markdown or configuration files,
+/// directories, and removals or renames. Plain reads and other files are ignored.
+fn is_relevant(event: &notify::Event) -> bool {
+    !matches!(event.kind, notify::EventKind::Access(_))
+        && (is_removal(event.kind)
+            || event.paths.iter().any(|path| {
+                path.file_name().is_some_and(|name| {
+                    name == "config.toml" || name == "project.toml" || name == "state.toml"
+                }) || path.extension().is_some_and(|extension| extension == "md")
+                    || path.is_dir()
+            }))
 }

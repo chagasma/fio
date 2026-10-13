@@ -36,12 +36,26 @@ impl External {
             "The editor target does not exist: {}",
             path.display()
         );
-        let editor = std::env::var("VISUAL")
-            .ok()
+        Self::with_editor(
+            std::env::var("VISUAL").ok().as_deref(),
+            std::env::var("EDITOR").ok().as_deref(),
+            path,
+            workspace,
+        )
+    }
+
+    /// `visual` wins over `editor` unless it is blank.
+    fn with_editor(
+        visual: Option<&str>,
+        editor: Option<&str>,
+        path: &Path,
+        workspace: &Path,
+    ) -> Result<Self> {
+        let editor = visual
             .filter(|s| !s.trim().is_empty())
-            .or_else(|| std::env::var("EDITOR").ok())
+            .or(editor)
             .context("Set VISUAL or EDITOR to your preferred terminal editor")?;
-        let mut words = shell_words::split(&editor)
+        let mut words = shell_words::split(editor)
             .context("Invalid VISUAL / EDITOR command")?
             .into_iter();
         let program = words.next().context("The editor command is empty")?;

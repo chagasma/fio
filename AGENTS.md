@@ -1,6 +1,6 @@
 # fio development
 
-Follow the scope and stages in `fio-plano.md`. Before starting a new stage, present a short plan and wait for user approval. Do not add tests, extra documentation, logs or compatibility shims unless requested. The integration instructions below are part of Stage 3. Use English for code, comments, interfaces, generated templates and project documentation. Preserve user-authored demand content.
+Before starting a new demand, present a short plan and wait for user approval. Do not add tests, extra documentation, logs or compatibility shims unless requested. Use English for code, comments, interfaces, generated templates and project documentation. Preserve user-authored demand content.
 
 # Demand context
 

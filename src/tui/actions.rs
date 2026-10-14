@@ -4,22 +4,31 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::ValueEnum;
+use ratatui::widgets::ListState;
 
 use super::{
     App, Modal,
-    screen::{NewDemand, Prompt, Screen, Tab},
+    screen::{NewDemand, Prompt, RowId, Screen, Tab},
 };
 use crate::{
     context::{self, DEFAULT_DECISIONS, DEFAULT_SESSIONS},
-    model::{Agent, DemandId, Priority, Status},
-    store::{catalog::DemandKey, demands, sessions, state, workspace::Workspace},
+    model::{Agent, DemandId, ItemKind, Priority, Status, section},
+    store::{catalog::DemandKey, demands, markdown, sessions, state, workspace::Workspace},
 };
 
 pub(super) struct Picker {
     pub title: String,
-    pub choices: Vec<(String, External)>,
+    pub choices: Vec<(String, Action)>,
+    pub state: ListState,
     pub selected: usize,
+}
+
+pub(super) enum Action {
+    External(External),
+    Status(DemandKey, Status),
+    Priority(DemandKey, Priority),
+    AddItem(DemandKey, ItemKind),
+    CompleteItem(DemandKey, ItemKind, String),
 }
 
 /// A program to run outside the TUI, in a workspace.
@@ -151,7 +160,13 @@ impl App {
 
     pub(super) fn begin_status(&mut self) -> Result<()> {
         let target = self.target()?;
-        self.begin_prompt(Prompt::Status(target));
+        self.choose(
+            "Set status",
+            Status::ALL
+                .into_iter()
+                .map(|status| (status.to_string(), Action::Status(target.clone(), status)))
+                .collect(),
+        );
         Ok(())
     }
 
@@ -181,15 +196,25 @@ impl App {
                 self.tab = Tab::Summary;
                 self.message = format!("Demand '{id}' created");
             }
-            Prompt::Status(key) => {
-                let status = Status::from_str(text.trim(), true).map_err(anyhow::Error::msg)?;
-                demands::load_for_update(&key.workspace()?, &key.id)?.set_status(status)?;
+            Prompt::AddItem(key, kind) => {
+                let id =
+                    demands::load_for_update(&key.workspace()?, &key.id)?.add_item(*kind, text)?;
                 self.refresh()?;
-                self.message = format!("Status updated for '{}'", key.id);
+                self.message = format!("Recorded {id} in '{}'", key.id);
+            }
+            Prompt::Answer(key, id) => {
+                demands::load_for_update(&key.workspace()?, &key.id)?.complete_item(
+                    ItemKind::Question,
+                    id,
+                    Some(text),
+                )?;
+                self.refresh()?;
+                self.message = format!("Answered {id} in '{}'", key.id);
             }
             Prompt::Search => {
-                text.clone_into(&mut self.query);
                 self.go(Screen::Search);
+                text.clone_into(&mut self.query);
+                self.invalidate();
             }
             Prompt::Command => self.command(text)?,
         }
@@ -244,7 +269,7 @@ impl App {
             .map(|path| {
                 Ok((
                     path.display().to_string(),
-                    External::editor(path, workspace.root())?,
+                    Action::External(External::editor(path, workspace.root())?),
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -257,7 +282,10 @@ impl App {
         let workspace = target.workspace()?;
         let loaded = demands::load(&workspace, &target.id)?;
         let mut choices = Vec::new();
-        for record in sessions::read(&loaded)?.into_iter().rev() {
+        let mut records = sessions::read(&loaded)?;
+        records
+            .sort_by(|a, b| (a.metadata().started, &a.path).cmp(&(b.metadata().started, &b.path)));
+        for record in records.into_iter().rev() {
             let session = record.metadata();
             let Some(id) = session.session_id.as_deref() else {
                 continue;
@@ -271,15 +299,18 @@ impl App {
             };
             choices.push((
                 format!(
-                    "{} · {} · {id}",
+                    "{} · {} · {id}\n  Objective: {}\n  Summary: {}\n  Next: {}",
                     session.agent.name(),
-                    session.started.format("%Y-%m-%dT%H:%M:%S%:z")
+                    session.started.format("%Y-%m-%dT%H:%M:%S%:z"),
+                    record.text(section::SESSION_OBJECTIVE)?.replace('\n', " "),
+                    record.text(section::WORK_COMPLETED)?.replace('\n', " "),
+                    record.text(section::NEXT_STEPS)?.replace('\n', " ")
                 ),
-                External {
+                Action::External(External {
                     program: session.agent.name().to_owned(),
                     args,
                     workspace: workspace.root().to_owned(),
-                },
+                }),
             ));
         }
         ensure!(
@@ -290,12 +321,153 @@ impl App {
         Ok(())
     }
 
-    fn choose(&mut self, title: &str, choices: Vec<(String, External)>) {
+    pub(super) fn begin_priority(&mut self) -> Result<()> {
+        let target = self.target()?;
+        self.choose(
+            "Set priority",
+            [Priority::High, Priority::Medium, Priority::Low]
+                .into_iter()
+                .map(|priority| {
+                    (
+                        priority.to_string(),
+                        Action::Priority(target.clone(), priority),
+                    )
+                })
+                .collect(),
+        );
+        Ok(())
+    }
+
+    pub(super) fn begin_action(&mut self) -> Result<()> {
+        let target = self.target()?;
+        let kind = if self.is_detail() {
+            self.tab.item_kind()
+        } else {
+            self.selected_row().and_then(|row| row.tab.item_kind())
+        };
+        if let Some(kind @ (ItemKind::Question | ItemKind::Debt)) = kind {
+            let demand = demands::load(&target.workspace()?, &target.id)?;
+            let selected = if self.is_detail() {
+                None
+            } else {
+                self.selected_row().and_then(|row| match &row.id {
+                    RowId::Item(_, id) => Some(id.as_str()),
+                    _ => None,
+                })
+            };
+            let choices = markdown::open_items(&demand.document.body, kind)?
+                .into_iter()
+                .filter_map(|item| {
+                    let id = item.id?;
+                    if selected.is_some_and(|selected| selected != id) {
+                        return None;
+                    }
+                    let verb = if kind == ItemKind::Question {
+                        "Answer"
+                    } else {
+                        "Resolve"
+                    };
+                    Some((
+                        format!("{verb} {id}: {}", item.text),
+                        Action::CompleteItem(target.clone(), kind, id),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            ensure!(!choices.is_empty(), "No numbered open items in this view");
+            self.choose("Choose an item", choices);
+        } else {
+            self.choose(
+                "Record in demand",
+                ItemKind::ALL
+                    .into_iter()
+                    .map(|kind| {
+                        let title = match kind {
+                            ItemKind::Decision => "Record decision",
+                            ItemKind::Question => "Ask question",
+                            ItemKind::Debt => "Record debt",
+                        };
+                        (title.to_owned(), Action::AddItem(target.clone(), kind))
+                    })
+                    .collect(),
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn apply_action(&mut self, action: Action) -> Result<()> {
+        match action {
+            Action::External(external) => self.external = Some(external),
+            Action::AddItem(key, kind) => self.begin_prompt(Prompt::AddItem(key, kind)),
+            Action::CompleteItem(key, ItemKind::Question, id) => {
+                self.begin_prompt(Prompt::Answer(key, id));
+            }
+            Action::CompleteItem(key, kind, id) => {
+                demands::load_for_update(&key.workspace()?, &key.id)?
+                    .complete_item(kind, &id, None)?;
+                self.refresh()?;
+                self.message = format!("Resolved {id} in '{}'", key.id);
+            }
+            Action::Status(key, status) => {
+                demands::load_for_update(&key.workspace()?, &key.id)?.set_status(status)?;
+                self.refresh()?;
+                self.message = format!("Status updated for '{}'", key.id);
+            }
+            Action::Priority(key, priority) => {
+                demands::load_for_update(&key.workspace()?, &key.id)?.set_priority(priority)?;
+                self.refresh()?;
+                self.message = format!("Priority updated for '{}'", key.id);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn preview_text(&self) -> Result<String> {
+        let key = self.target()?;
+        let entry = self.catalog.find(&key).context("Demand unavailable")?;
+        let metadata = &entry.loaded.document.metadata;
+        let body = &entry.loaded.document.body;
+        let mut records = sessions::read(&entry.loaded)?;
+        records.sort_by_key(|record| record.metadata().started);
+        let next = records
+            .last()
+            .map(|record| record.text(section::NEXT_STEPS))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(format!(
+            "{}\n{} · {}\n\nObjective\n{}\n\nCurrent state\n{}\n\nNext steps\n{}",
+            metadata.title,
+            metadata.status,
+            metadata.priority,
+            markdown::section_text(body, section::OBJECTIVE)?,
+            markdown::section_text(body, section::CURRENT_STATE)?,
+            if next.is_empty() {
+                "Not recorded."
+            } else {
+                &next
+            }
+        ))
+    }
+
+    pub(super) fn preview_context(&mut self) -> Result<()> {
+        let target = self.target()?;
+        let workspace = target.workspace()?;
+        let demand = demands::load(&workspace, &target.id)?;
+        let text =
+            context::build(&workspace, &demand, DEFAULT_SESSIONS, DEFAULT_DECISIONS)?.markdown();
+        self.modal = Modal::Preview(super::screen::Preview::new(
+            format!("Context · {}", target.id),
+            text,
+        ));
+        Ok(())
+    }
+
+    fn choose(&mut self, title: &str, choices: Vec<(String, Action)>) {
         // Always show the target before launching an external application.
         self.modal = Modal::Picker(Picker {
             title: title.into(),
             choices,
             selected: 0,
+            state: ListState::default(),
         });
     }
 }

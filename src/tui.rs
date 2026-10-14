@@ -1,6 +1,7 @@
 mod actions;
 mod input;
 mod mascot;
+mod navigation;
 mod rows;
 mod screen;
 mod theme;
@@ -36,6 +37,7 @@ enum Modal {
     None,
     Input { prompt: Prompt, text: String },
     Picker(Picker),
+    Preview(screen::Preview),
     Help,
 }
 
@@ -53,7 +55,7 @@ struct App {
     catalog: Catalog,
     index: Index,
     screen: Screen,
-    history: Vec<Screen>,
+    history: Vec<navigation::Location>,
     selection: ListState,
     tab: Tab,
     scroll: u16,
@@ -215,26 +217,6 @@ impl App {
         };
     }
 
-    /// Navigates to `screen`, remembering the current one.
-    fn go(&mut self, screen: Screen) {
-        let previous = std::mem::replace(&mut self.screen, screen);
-        self.history.push(previous);
-        self.reset_view();
-    }
-
-    fn back(&mut self) {
-        if let Some(screen) = self.history.pop() {
-            self.screen = screen;
-            self.reset_view();
-        }
-    }
-
-    fn reset_view(&mut self) {
-        self.selection = ListState::default().with_selected(Some(0));
-        self.scroll = 0;
-        self.invalidate();
-    }
-
     /// Recomputes cached rows and clears the cached detail text.
     fn invalidate(&mut self) {
         self.detail = None;
@@ -277,7 +259,7 @@ impl App {
 
     fn refresh(&mut self) -> Result<()> {
         let (catalog, index) = (self.load)()?;
-        let selected = self.selected_row().map(|row| row.target.clone());
+        let selected = self.selected_row().map(|row| row.id.clone());
         self.catalog = catalog;
         self.index = index;
         if !self.is_valid(&self.screen) {
@@ -286,17 +268,10 @@ impl App {
         let history = std::mem::take(&mut self.history);
         self.history = history
             .into_iter()
-            .filter(|screen| self.is_valid(screen))
+            .filter(|location| self.is_valid(&location.screen))
             .collect();
         self.invalidate();
-        if let Some(selected) = selected {
-            let position = self
-                .rows
-                .iter()
-                .position(|row| row.target == selected)
-                .unwrap_or(0);
-            self.selection.select(Some(position));
-        }
+        self.restore_selection(selected.as_ref());
         self.message = "Refreshed from Markdown".into();
         Ok(())
     }
@@ -610,7 +585,7 @@ mod tests {
         assert!(at(&app, &Screen::Search));
         assert_eq!(app.query, "zebra");
         assert_eq!(row_targets(&app), ["a"]);
-        assert!(screen_text(&mut app, 100, 20).contains("search: zebra"));
+        assert!(screen_text(&mut app, 140, 20).contains("search: zebra"));
     }
 
     #[test]
@@ -713,21 +688,32 @@ mod tests {
         let temp = TempWorkspace::with_demands(&["a"]);
         let mut app = app_for(&temp);
         open_detail(&mut app, &temp, "a");
-        submit(&mut app, 's', "done");
+        press(&mut app, KeyCode::Char('s'));
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Down);
+        }
+        press(&mut app, KeyCode::Enter);
         let loaded = demands::load(&temp.workspace, &id("a")).unwrap();
         assert_eq!(loaded.document.metadata.status, Status::Done);
         assert!(app.message.contains("Status updated"));
     }
 
     #[test]
-    fn an_unknown_status_keeps_the_draft() {
+    fn cancelling_status_picker_preserves_the_demand() {
         let temp = TempWorkspace::with_demands(&["a"]);
         let mut app = app_for(&temp);
         open_detail(&mut app, &temp, "a");
         press(&mut app, KeyCode::Char('s'));
-        type_text(&mut app, "nonsense");
-        assert_err(press_err(&mut app, KeyCode::Enter), "nonsense");
-        assert!(matches!(&app.modal, Modal::Input { text, .. } if text == "nonsense"));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            demands::load(&temp.workspace, &id("a"))
+                .unwrap()
+                .document
+                .metadata
+                .status,
+            Status::Backlog
+        );
     }
 
     #[test]
@@ -1003,5 +989,180 @@ mod tests {
         }
         open_detail(&mut app, &temp, "a");
         screen_text(&mut app, 10, 5);
+    }
+    #[test]
+    fn back_restores_selection_filters_and_detail_scroll() {
+        let temp = TempWorkspace::with_demands(&["a", "b", "c"]);
+        let mut app = app_for(&temp);
+        press(&mut app, KeyCode::Char('2'));
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('3'));
+        app.scroll = 7;
+        app.go(Screen::Questions);
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.tab == Tab::Decisions);
+        assert_eq!(app.scroll, 7);
+        assert_eq!(app.status, Some(Status::Backlog));
+        press(&mut app, KeyCode::Esc);
+        assert!(at(&app, &Screen::Demands(None)));
+        assert_eq!(app.selection.selected(), Some(1));
+        assert_eq!(app.target().unwrap().id, id("b"));
+    }
+
+    fn add_questions(temp: &TempWorkspace) {
+        let mut demand = demands::load_for_update(&temp.workspace, &id("a")).unwrap();
+        demand
+            .add_item(ItemKind::Question, "First question?")
+            .unwrap();
+        demand
+            .add_item(ItemKind::Question, "Second question?")
+            .unwrap();
+    }
+
+    #[test]
+    fn refresh_preserves_the_exact_question_in_a_demand() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        add_questions(&temp);
+        let mut app = app_for(&temp);
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::F(5));
+        assert_eq!(app.selection.selected(), Some(1));
+        assert!(
+            matches!(&app.selected_row().unwrap().id, screen::RowId::Item(_, id) if id == "Q2")
+        );
+    }
+
+    #[test]
+    fn answer_selected_question_persists_unicode_and_keeps_other_questions_open() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        add_questions(&temp);
+        let mut app = app_for(&temp);
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Enter);
+        assert_err(press_err(&mut app, KeyCode::Enter), "empty");
+        assert!(matches!(app.modal, Modal::Input { .. }));
+        type_text(&mut app, "Sim, múltiplos fornecedores são permitidos.");
+        press(&mut app, KeyCode::Enter);
+        let demand = demands::load(&temp.workspace, &id("a")).unwrap();
+        let open =
+            crate::store::markdown::open_items(&demand.document.body, ItemKind::Question).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id.as_deref(), Some("Q1"));
+        assert!(demand.document.body.contains("múltiplos fornecedores"));
+        assert_eq!(app.rows.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_answer_does_not_change_the_file() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        add_questions(&temp);
+        let demand = demands::load(&temp.workspace, &id("a")).unwrap();
+        let before = fs::read_to_string(&demand.path).unwrap();
+        let mut app = app_for(&temp);
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Enter);
+        type_text(&mut app, "unfinished answer");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(fs::read_to_string(demand.path).unwrap(), before);
+    }
+
+    #[test]
+    fn resolve_selected_debt_and_record_a_decision() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        demands::load_for_update(&temp.workspace, &id("a"))
+            .unwrap()
+            .add_item(ItemKind::Debt, "Remove mock")
+            .unwrap();
+        let mut app = app_for(&temp);
+        press(&mut app, KeyCode::Char('5'));
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.rows.is_empty());
+        open_detail(&mut app, &temp, "a");
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Enter);
+        type_text(&mut app, "Keep data in Markdown");
+        press(&mut app, KeyCode::Enter);
+        let demand = demands::load(&temp.workspace, &id("a")).unwrap();
+        assert!(
+            crate::store::markdown::open_items(&demand.document.body, ItemKind::Debt)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(demand.document.body.contains("Keep data in Markdown"));
+    }
+
+    #[test]
+    fn priority_picker_writes_the_selected_priority() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        let mut app = app_for(&temp);
+        open_detail(&mut app, &temp, "a");
+        press(&mut app, KeyCode::Char('P'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            demands::load(&temp.workspace, &id("a"))
+                .unwrap()
+                .document
+                .metadata
+                .priority,
+            Priority::High
+        );
+    }
+
+    #[test]
+    fn consecutive_searches_refresh_results_and_back_restores_the_query() {
+        let temp = TempWorkspace::with_demands(&["alpha", "beta"]);
+        let mut app = app_for(&temp);
+        submit(&mut app, '/', "alpha");
+        assert_eq!(row_targets(&app), ["alpha"]);
+        submit(&mut app, '/', "beta");
+        assert_eq!(row_targets(&app), ["beta"]);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.query, "alpha");
+        assert_eq!(row_targets(&app), ["alpha"]);
+    }
+
+    #[test]
+    fn context_preview_scrolls_without_losing_the_underlying_view() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        add_questions(&temp);
+        let mut app = app_for(&temp);
+        open_detail(&mut app, &temp, "a");
+        app.scroll = 3;
+        press(&mut app, KeyCode::Char('v'));
+        let text = screen_text(&mut app, 80, 24);
+        assert!(text.contains("Context · a") && text.contains("Open questions"));
+        press(&mut app, KeyCode::End);
+        assert!(
+            matches!(&app.modal, Modal::Preview(p) if p.scroll == p.max_scroll && p.scroll > 0)
+        );
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.scroll, 3);
+        assert!(app.is_detail());
+    }
+
+    #[test]
+    fn preview_is_responsive_and_long_input_keeps_its_cursor_visible() {
+        let temp = TempWorkspace::with_demands(&["a"]);
+        add_questions(&temp);
+        let mut app = app_for(&temp);
+        press(&mut app, KeyCode::Char('4'));
+        assert!(screen_text(&mut app, 140, 32).contains("Preview · v full context"));
+        assert!(!screen_text(&mut app, 80, 24).contains("Preview · v full context"));
+        press(&mut app, KeyCode::Char('a'));
+        assert!(screen_text(&mut app, 40, 20).contains("Answer Q1"));
+        press(&mut app, KeyCode::Enter);
+        type_text(&mut app, &"long answer with unicode ação ".repeat(8));
+        assert!(screen_text(&mut app, 40, 20).contains('▏'));
+        for (width, height) in [(1, 1), (20, 8), (80, 24), (140, 32)] {
+            screen_text(&mut app, width, height);
+        }
     }
 }

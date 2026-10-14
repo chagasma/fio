@@ -24,8 +24,9 @@ impl App {
             "" => (),
             _ => match text.strip_prefix("search ") {
                 Some(term) => {
-                    self.query = term.trim().into();
                     self.go(Screen::Search);
+                    self.query = term.trim().into();
+                    self.invalidate();
                 }
                 None => self.message = "Unknown command. Press ? for help.".into(),
             },
@@ -36,8 +37,24 @@ impl App {
     pub(super) fn key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Result<()> {
         match std::mem::replace(&mut self.modal, Modal::None) {
             Modal::Input { prompt, text } => self.input_key(prompt, text, key, modifiers),
-            Modal::Picker(picker) => {
-                self.picker_key(picker, key);
+            Modal::Picker(picker) => self.picker_key(picker, key),
+            Modal::Preview(mut preview) => {
+                match key {
+                    KeyCode::Esc | KeyCode::Char('q' | 'v') => return Ok(()),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        preview.scroll = preview.scroll.saturating_add(1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        preview.scroll = preview.scroll.saturating_sub(1);
+                    }
+                    KeyCode::PageDown => preview.scroll = preview.scroll.saturating_add(10),
+                    KeyCode::PageUp => preview.scroll = preview.scroll.saturating_sub(10),
+                    KeyCode::Home => preview.scroll = 0,
+                    KeyCode::End => preview.scroll = preview.max_scroll,
+                    _ => (),
+                }
+                preview.scroll = preview.scroll.min(preview.max_scroll);
+                self.modal = Modal::Preview(preview);
                 Ok(())
             }
             Modal::Help => {
@@ -76,12 +93,11 @@ impl App {
         Ok(())
     }
 
-    fn picker_key(&mut self, mut picker: Picker, key: KeyCode) {
+    fn picker_key(&mut self, mut picker: Picker, key: KeyCode) -> Result<()> {
         match key {
-            KeyCode::Esc => return,
+            KeyCode::Esc => return Ok(()),
             KeyCode::Enter => {
-                self.external = Some(picker.choices.remove(picker.selected).1);
-                return;
+                return self.apply_action(picker.choices.remove(picker.selected).1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 picker.selected = (picker.selected + 1).min(picker.choices.len() - 1);
@@ -92,6 +108,7 @@ impl App {
             _ => (),
         }
         self.modal = Modal::Picker(picker);
+        Ok(())
     }
 
     fn help_key(&mut self, key: KeyCode) {
@@ -108,6 +125,9 @@ impl App {
             KeyCode::Char('n') => self.begin_new()?,
             KeyCode::Char('N') => self.begin_new_child()?,
             KeyCode::Char('s') => self.begin_status()?,
+            KeyCode::Char('P') => self.begin_priority()?,
+            KeyCode::Char('a') => self.begin_action()?,
+            KeyCode::Char('v') => self.preview_context()?,
             KeyCode::Char('u') => self.use_selected()?,
             KeyCode::Char('c') => self.copy_context()?,
             KeyCode::Char('e') => self.edit_selected()?,
@@ -132,8 +152,9 @@ impl App {
             KeyCode::Enter if !self.is_detail() => {
                 if let Some(row) = self.selected_row() {
                     let (target, tab) = (row.target.clone(), row.tab);
-                    self.tab = tab;
                     self.go(target);
+                    self.tab = tab;
+                    self.invalidate();
                 }
             }
             KeyCode::Char('f') => {

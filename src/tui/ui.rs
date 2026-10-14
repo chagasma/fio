@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::Modifier,
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, List, ListItem, ListState, Padding, Paragraph, Wrap},
+    widgets::{Block, BorderType, List, ListItem, Padding, Paragraph, Wrap},
 };
 
 use super::{
@@ -33,7 +33,9 @@ Linked document contents and agent transcripts are not indexed.
 Actions
 n: new demand (select its project first)
 N: new sub-demand inside the selected demand
-s: set selected demand status   u: use as active demand
+s: choose status   P: choose priority   u: use as active demand
+a: answer / resolve the selected item, or record a decision, question or debt
+v: preview the full context
 c: copy context   e: open file in VISUAL / EDITOR
 r: choose an agent session to resume
 Sessions / Docs tabs: e opens a file selector.
@@ -56,7 +58,7 @@ impl App {
         let areas = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(1),
-            Constraint::Length(4),
+            Constraint::Length(5),
         ])
         .split(frame.area());
         self.draw_header(frame, areas[0]);
@@ -75,7 +77,7 @@ impl App {
     }
 
     fn shows_empty_state(&self) -> bool {
-        !matches!(self.modal, Modal::Picker(_))
+        matches!(self.modal, Modal::None | Modal::Input { .. })
             && !self.is_detail()
             && (self.rows_error.is_some() || self.rows.is_empty())
     }
@@ -118,6 +120,21 @@ impl App {
                 theme::selected(),
             ));
         }
+        if navigation.iter().map(Span::width).sum::<usize>()
+            > usize::from(area.width.saturating_sub(4))
+        {
+            let title = if self.is_detail() {
+                self.tab.title().to_owned()
+            } else if self.screen == Screen::Search {
+                format!("Search: {}", self.query)
+            } else {
+                GLOBAL_VIEWS[current.unwrap_or(0)].to_owned()
+            };
+            navigation = vec![
+                Span::styled(title, theme::selected()),
+                Span::styled(" · ? help", theme::muted()),
+            ];
+        }
         let title = Line::from(vec![
             Span::styled(" fio ", theme::selected()),
             Span::styled(
@@ -137,25 +154,7 @@ impl App {
 
     fn draw_body(&mut self, frame: &mut Frame, area: Rect) {
         let block = panel();
-        if let Modal::Picker(picker) = &self.modal {
-            let items: Vec<_> = picker
-                .choices
-                .iter()
-                .map(|(label, _)| ListItem::new(label.clone()))
-                .collect();
-            let mut state = ListState::default().with_selected(Some(picker.selected));
-            let title = Line::from(vec![
-                Span::styled(format!(" {} ", picker.title), theme::heading()),
-                Span::styled("Enter launch · Esc cancel ", theme::muted()),
-            ]);
-            frame.render_stateful_widget(
-                List::new(items)
-                    .block(block.title(title))
-                    .highlight_symbol("▶ ")
-                    .highlight_style(theme::selected()),
-                area,
-                &mut state,
-            );
+        if self.draw_modal(frame, area) {
             return;
         }
         if matches!(self.modal, Modal::Help) {
@@ -192,6 +191,25 @@ impl App {
             self.draw_empty(frame, area, block, &message);
             return;
         }
+        let area = if area.width >= 120 && area.height >= 12 && self.target().is_ok() {
+            let areas =
+                Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+                    .split(area);
+            let text = self
+                .preview_text()
+                .unwrap_or_else(|error| format!("Preview unavailable: {error:#}"));
+            frame.render_widget(
+                Paragraph::new(theme::styled(&text))
+                    .wrap(Wrap { trim: false })
+                    .block(
+                        panel().title(Span::styled(" Preview · v full context ", theme::heading())),
+                    ),
+                areas[1],
+            );
+            areas[0]
+        } else {
+            area
+        };
         let selected = self
             .selection
             .selected()
@@ -211,6 +229,49 @@ impl App {
             area,
             &mut self.selection,
         );
+    }
+
+    fn draw_modal(&mut self, frame: &mut Frame, area: Rect) -> bool {
+        if let Modal::Picker(picker) = &mut self.modal {
+            let items: Vec<_> = picker
+                .choices
+                .iter()
+                .map(|(label, _)| ListItem::new(wrap_text(label, area.width.saturating_sub(6))))
+                .collect();
+            picker.state.select(Some(picker.selected));
+            let title = Line::from(vec![
+                Span::styled(format!(" {} ", picker.title), theme::heading()),
+                Span::styled("Enter select · Esc cancel ", theme::muted()),
+            ]);
+            frame.render_stateful_widget(
+                List::new(items)
+                    .block(panel().title(title))
+                    .highlight_symbol("▶ ")
+                    .highlight_style(theme::selected()),
+                area,
+                &mut picker.state,
+            );
+            return true;
+        }
+        if let Modal::Preview(preview) = &mut self.modal {
+            let block = panel().title(Span::styled(
+                format!(" {} ", preview.title),
+                theme::heading(),
+            ));
+            let inner = block.inner(area);
+            let paragraph = Paragraph::new(theme::styled(&preview.text)).wrap(Wrap { trim: false });
+            preview.max_scroll = u16::try_from(
+                paragraph
+                    .line_count(inner.width)
+                    .saturating_sub(inner.height as usize),
+            )
+            .unwrap_or(u16::MAX);
+            preview.scroll = preview.scroll.min(preview.max_scroll);
+            frame.render_widget(block, area);
+            frame.render_widget(paragraph.scroll((preview.scroll, 0)), inner);
+            return true;
+        }
+        false
     }
 
     fn draw_empty(&self, frame: &mut Frame, area: Rect, block: Block<'_>, message: &str) {
@@ -258,11 +319,7 @@ impl App {
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
         let lines = if let Modal::Input { prompt, text } = &self.modal {
             vec![
-                Line::from(vec![
-                    Span::styled(prompt.label(), theme::heading()),
-                    Span::raw(text.clone()),
-                    Span::styled("▏", theme::accent()),
-                ]),
+                input_line(&prompt.label(), text, area.width.saturating_sub(4)),
                 Line::from(Span::styled(
                     self.message.clone(),
                     theme::message(&self.message),
@@ -289,24 +346,37 @@ impl App {
                 theme::muted(),
             ));
             let mut hints = Vec::new();
-            for (key, what) in [
-                ("n", "new"),
-                ("N", "sub"),
-                ("s", "status"),
-                ("u", "active"),
-                ("c", "copy"),
-                ("e", "edit"),
-                ("r", "resume"),
-                ("/", "search"),
-                ("?", "help"),
-            ] {
-                hints.extend(theme::hint(key, what));
+            let shortcuts: &[(&str, &str)] = match self.modal {
+                Modal::Preview(_) | Modal::Help => &[("j/k", "scroll"), ("Esc", "back")],
+                Modal::Picker(_) => &[("j/k", "choose"), ("Enter", "select"), ("Esc", "cancel")],
+                _ if self.target().is_ok() => &[
+                    ("a", "actions"),
+                    ("v", "context"),
+                    ("s", "status"),
+                    ("P", "priority"),
+                    ("r", "resume"),
+                    ("?", "help"),
+                ],
+                _ => &[("n", "new"), ("/", "search"), ("?", "help")],
+            };
+            for &(key, what) in shortcuts {
+                let next = theme::hint(key, what);
+                let width: usize = hints.iter().map(Span::width).sum();
+                if width + next.iter().map(Span::width).sum::<usize>()
+                    > usize::from(area.width.saturating_sub(4))
+                {
+                    break;
+                }
+                hints.extend(next);
             }
-            hints.push(Span::styled(
-                self.message.clone(),
-                theme::message(&self.message).add_modifier(Modifier::ITALIC),
-            ));
-            vec![Line::from(filters), Line::from(hints)]
+            vec![
+                Line::from(filters),
+                Line::from(hints),
+                Line::from(Span::styled(
+                    self.message.clone(),
+                    theme::message(&self.message).add_modifier(Modifier::ITALIC),
+                )),
+            ]
         };
         frame.render_widget(Paragraph::new(lines).block(panel()), area);
     }
@@ -331,4 +401,52 @@ impl App {
         self.scroll = self.scroll.min(self.max_scroll);
         frame.render_widget(paragraph.scroll((self.scroll, 0)), area);
     }
+}
+
+/// Wrap picker labels so long questions and session objectives remain readable.
+fn wrap_text(text: &str, width: u16) -> Text<'static> {
+    let width = usize::from(width.max(1));
+    let mut lines = Vec::new();
+    for source in text.lines() {
+        let mut line = String::new();
+        let mut used = 0;
+        for ch in source.chars() {
+            let size = Span::raw(ch.to_string()).width();
+            if used + size > width && !line.is_empty() {
+                lines.push(Line::raw(std::mem::take(&mut line)));
+                used = 0;
+            }
+            line.push(ch);
+            used += size;
+        }
+        lines.push(Line::raw(line));
+    }
+    Text::from(lines)
+}
+
+fn input_line(label: &str, text: &str, width: u16) -> Line<'static> {
+    let width = usize::from(width);
+    let label = if Span::raw(label).width() + 2 < width {
+        label
+    } else {
+        "> "
+    };
+    let available = width.saturating_sub(Span::raw(label).width() + 1);
+    let mut used = 0;
+    let tail: String = text
+        .chars()
+        .rev()
+        .take_while(|ch| {
+            used += Span::raw(ch.to_string()).width();
+            used <= available
+        })
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    Line::from(vec![
+        Span::styled(label.to_owned(), theme::heading()),
+        Span::raw(tail),
+        Span::styled("▏", theme::accent()),
+    ])
 }

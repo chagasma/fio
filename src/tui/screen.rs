@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use ratatui::text::Text;
 
 use crate::{
-    model::{DemandId, ItemKind, Status},
+    model::{DemandId, ItemKind},
     store::catalog::DemandKey,
 };
 
@@ -90,10 +90,37 @@ impl Tab {
     }
 }
 
+#[derive(Clone, PartialEq)]
+pub enum RowId {
+    Project(PathBuf),
+    Demand(DemandKey),
+    Item(DemandKey, String),
+    Document(PathBuf),
+}
+
 pub struct Row {
+    pub id: RowId,
     pub label: Text<'static>,
     pub target: Screen,
     pub tab: Tab,
+}
+
+pub struct Preview {
+    pub title: String,
+    pub text: String,
+    pub scroll: u16,
+    pub max_scroll: u16,
+}
+
+impl Preview {
+    pub fn new(title: String, text: String) -> Self {
+        Self {
+            title,
+            text,
+            scroll: 0,
+            max_scroll: 0,
+        }
+    }
 }
 
 /// Where a demand being created goes: a workspace, and optionally a parent demand.
@@ -107,7 +134,8 @@ pub struct NewDemand {
 pub enum Prompt {
     NewId(NewDemand),
     NewTitle(NewDemand, DemandId),
-    Status(DemandKey),
+    AddItem(DemandKey, ItemKind),
+    Answer(DemandKey, String),
     Search,
     Command,
 }
@@ -121,10 +149,8 @@ impl Prompt {
                 ..
             }) => format!("New sub-demand ID (in {parent}): "),
             Self::NewTitle(..) => "New demand title: ".into(),
-            Self::Status(_) => {
-                let names: Vec<_> = Status::ALL.iter().map(|status| status.name()).collect();
-                format!("Status ({}): ", names.join("/"))
-            }
+            Self::AddItem(_, kind) => format!("New {}: ", kind.section().to_lowercase()),
+            Self::Answer(_, id) => format!("Answer {id}: "),
             Self::Search => "/".into(),
             Self::Command => ":".into(),
         }
@@ -176,15 +202,14 @@ mod tests {
             ..new
         };
         assert!(Prompt::NewId(child).label().contains("(in p)"));
-        let status = Prompt::Status(DemandKey {
-            workspace: PathBuf::from("/w"),
-            id: "a".parse().unwrap(),
-        });
-        assert!(
-            status
-                .label()
-                .contains("backlog/active/paused/blocked/done/archived")
+        let answer = Prompt::Answer(
+            DemandKey {
+                workspace: PathBuf::from("/w"),
+                id: "a".parse().unwrap(),
+            },
+            "Q2".into(),
         );
+        assert_eq!(answer.label(), "Answer Q2: ");
     }
 
     #[test]

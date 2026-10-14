@@ -8,7 +8,7 @@ use ratatui::{
 
 use super::{
     App,
-    screen::{Row, Screen, Tab},
+    screen::{Row, RowId, Screen, Tab},
     theme,
 };
 use crate::{
@@ -37,6 +37,7 @@ impl App {
             .projects
             .iter()
             .map(|project| Row {
+                id: RowId::Project(project.workspace.clone()),
                 label: Line::from(vec![
                     Span::styled(project.name.clone(), theme::heading()),
                     Span::raw("   "),
@@ -67,6 +68,7 @@ impl App {
                 let mut snippet = vec![Span::raw("    ")];
                 snippet.extend(highlight(&hit.snippet.replace('\n', " ")));
                 Some(Row {
+                    id: RowId::Document(hit.path),
                     label: Text::from(vec![title, Line::from(snippet)]),
                     target: Screen::Detail(key),
                     tab: if hit.kind == HitKind::Session {
@@ -142,25 +144,32 @@ impl App {
                 let mut spans = prefix;
                 spans.push(Span::raw(demand.title.clone()));
                 rows.push(Row {
+                    id: RowId::Demand(entry.key()),
                     label: Line::from(spans).into(),
                     target: Screen::Detail(entry.key()),
                     tab: Tab::Summary,
                 });
                 continue;
             };
-            let texts = markdown::open_items(&entry.loaded.document.body, kind).map_or_else(
-                |error| vec![format!("Could not read {}: {error:#}", kind.section())],
-                |items| items.into_iter().map(|item| item.text).collect(),
-            );
-            rows.extend(texts.into_iter().map(|text| {
-                let mut spans = prefix.clone();
-                spans.push(Span::raw(text));
-                Row {
-                    label: Line::from(spans).into(),
+            match markdown::open_items(&entry.loaded.document.body, kind) {
+                Ok(items) => rows.extend(items.into_iter().map(|item| {
+                    let mut spans = prefix.clone();
+                    let id = item.id.clone().unwrap_or_else(|| item.text.clone());
+                    spans.push(Span::raw(item.text));
+                    Row {
+                        id: RowId::Item(entry.key(), id),
+                        label: Line::from(spans).into(),
+                        target: Screen::Detail(entry.key()),
+                        tab: Tab::for_kind(kind),
+                    }
+                })),
+                Err(error) => rows.push(Row {
+                    id: RowId::Demand(entry.key()),
+                    label: Text::raw(format!("Could not read {}: {error:#}", kind.section())),
                     target: Screen::Detail(entry.key()),
                     tab: Tab::for_kind(kind),
-                }
-            }));
+                }),
+            }
         }
         rows
     }
